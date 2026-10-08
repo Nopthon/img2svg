@@ -45,7 +45,7 @@ Two ways, same engine:
   python scripts/vectorize.py auto "reference.png" --output outputs --fidelity balanced --demo
   ```
 
-`--fidelity 0..100` (or `faithful`/`balanced`/`compact`) is a single axis trading detail for file size, applied across `prepare`, `trace` and `auto`: `faithful` keeps every contour, `compact` merges shades and coarsens contours.
+`--fidelity 0..100` (or `faithful`/`balanced`/`compact`, default `balanced`) is a single axis trading detail for file size, applied across `prepare`, `trace` and `auto`: `faithful` keeps every contour, `compact` merges shades and coarsens contours.
 
 ## How it works
 

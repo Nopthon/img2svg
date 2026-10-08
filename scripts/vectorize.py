@@ -51,7 +51,7 @@ def prepare(a):
     rgba=image_rgba(a.input);rgb=rgba[:,:,:3];alpha=rgba[:,:,3];h,w=alpha.shape
     visible=alpha>0
     if not visible.any():raise ValueError('Reference is fully transparent')
-    prof=quality_profile(a.fidelity) if getattr(a,'fidelity',None) else None
+    prof=quality_profile(a.fidelity)
     colors=a.colors if a.colors is not None else (prof['colors'] if prof else 80)
     smooth=cv2.bilateralFilter(rgb,5,a.denoise,3) if a.denoise else rgb
     lab=cv2.cvtColor(smooth,cv2.COLOR_RGB2LAB)
@@ -479,10 +479,11 @@ def main():
         if a.max_bytes<0 or a.max_paths<0:parser.error('max-bytes/max-paths must be >= 0; 0 disables the limit')
         auto(a)
     else:
-        prof=quality_profile(a.fidelity) if a.fidelity else None
-        if a.epsilon is None:a.epsilon=prof['epsilon'] if prof else .55
-        if a.overlap is None:a.overlap=prof['overlap'] if prof else 1.4
-        if a.merge_colors is None:a.merge_colors=prof['merge_distance'] if prof else 0
+        prof=quality_profile(a.fidelity)
+        if a.epsilon is None:a.epsilon=prof['epsilon']
+        if a.overlap is None:a.overlap=prof['overlap']
+        if a.merge_colors is None:a.merge_colors=prof['merge_distance']
+        a.fidelity=prof['fidelity']
         if not 0<=a.epsilon<=2 or not 0<=a.overlap<=3:parser.error('epsilon 0..2; overlap 0..3')
         if not 0<=a.merge_colors<=60:parser.error('merge-colors must be 0..60')
         if a.max_bytes<0 or a.max_paths<0:parser.error('max-bytes/max-paths must be >= 0; 0 disables the limit')

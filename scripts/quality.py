@@ -1,13 +1,14 @@
 """Single fidelity <-> size control shared by every stage.
 
 0 = smallest file (aggressively merged, coarse contours);
-100 = most faithful (per-contour pixel tracing).
+100 = most faithful (per-contour pixel tracing); default = 55 (balanced).
 
 Both the command-line tool (`--fidelity`) and the agent skill use this one axis.
 The skill asks the user where to sit on it. Accepts a number 0..100 or one of
 the named presets `faithful` (100), `balanced` (55), `compact` (0).
 """
 NAMES={'faithful':100,'balanced':55,'compact':0}
+DEFAULT=55.0
 
 def resolve(value):
     if value is None:return None
@@ -23,7 +24,7 @@ def resolve(value):
 def profile(fidelity):
     """Map a fidelity value to concrete stage parameters, interpolated linearly."""
     f=resolve(fidelity)
-    if f is None:f=100.0
+    if f is None:f=DEFAULT
     t=f/100.0
     return {
         'fidelity':f,

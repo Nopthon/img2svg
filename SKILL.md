@@ -2,7 +2,7 @@
 name: img2svg
 description: Reconstruct reference illustrations as SVG using image-specific semantic plans, visual comparisons and local repairs; optionally create an offline drawing replay.
 metadata:
-  version: "1.4.0"
+  version: "1.5.0"
 ---
 
 # Reference image → faithful SVG
@@ -19,7 +19,7 @@ The model interprets the image and corrects defects; scripts extract geometry. U
 
 ## Fidelity vs size
 
-One axis drives every stage: `--fidelity 0..100` (or the names `faithful`/`balanced`/`compact`). `100`/`faithful` keeps every contour (largest files, maximum detail); `0`/`compact` merges near-duplicate colours, despeckles and coarsens contours (smallest files). Interpolation is linear. **Ask the user where to sit on this axis** before preparing when the image is large or output size matters; default `balanced` for dense illustrations and `faithful` for logos or fine-line diagrams. `prepare`, `trace` and `auto` all accept `--fidelity`, and the chosen value is recorded as `fidelity` in the reports.
+One axis drives every stage: `--fidelity 0..100` (or the names `faithful`/`balanced`/`compact`). `100`/`faithful` keeps every contour (largest files, maximum detail); `0`/`compact` merges near-duplicate colours, despeckles and coarsens contours (smallest files). Interpolation is linear, and the default is `balanced` (55), which looks good on dense illustrations. **Ask the user where to sit on this axis** when the image is large or output size matters; pass `--fidelity faithful` for maximum detail or `compact` for the smallest file. `prepare`, `trace` and `auto` all accept `--fidelity`, and the chosen value is recorded as `fidelity` in the reports.
 
 ## Visual access
 
