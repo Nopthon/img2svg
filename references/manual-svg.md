@@ -9,13 +9,13 @@ For `make_demo.py`, place semantic region groups directly inside `<g id="artwork
      width="120" height="80" viewBox="0 0 120 80"
      preserveAspectRatio="xMidYMid meet">
   <g id="artwork">
-    <g id="leaf" data-region="leaf" data-base="#89b97a" data-order="0">
-      <g id="leaf-color" data-tone="color" data-order="0">
-        <path id="leaf-body" d="M20 60 Q20 15 100 20 Q90 65 20 60 Z"
+    <g id="shape" data-region="shape" data-base="#89b97a" data-order="0">
+      <g id="shape-color" data-tone="color" data-order="0">
+        <path id="shape-body" d="M20 60 Q20 15 100 20 Q90 65 20 60 Z"
               fill="#89b97a" stroke="none"/>
       </g>
-      <g id="leaf-ink" data-tone="ink" data-order="0">
-        <path id="leaf-vein" d="M20 60 Q60 40 100 20"
+      <g id="shape-ink" data-tone="ink" data-order="0">
+        <path id="shape-line" d="M20 60 Q60 40 100 20"
               fill="none" stroke="#435e42" stroke-width="2"/>
       </g>
     </g>

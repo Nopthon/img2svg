@@ -222,7 +222,7 @@ def load_prepared(work,plan):
     prepared_report=Path(work)/'prepare-report.json'
     if plan.get('source_sha256'):
         report=json.loads(prepared_report.read_text(encoding='utf-8')) if prepared_report.exists() else {}
-        if report.get('source_sha256')!=plan['source_sha256']:raise ValueError('This case-study plan belongs to a different source image')
+        if report.get('source_sha256')!=plan['source_sha256']:raise ValueError('Plan source_sha256 belongs to a different source image')
     if plan.get('palette_fingerprint') and plan['palette_fingerprint']!=palette_id(palette):
         raise ValueError('Palette changed: inspect new palette and rebuild role/filter indices')
     regions,mapping=plan_regions(plan,labels)

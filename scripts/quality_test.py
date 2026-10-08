@@ -30,9 +30,9 @@ def main():
     clean,reports=clean_regions(labels,palette,alpha,mapping,regions,plan['roles'])
     assert clean[20,20]==1,'Confirmed low-contrast island was not merged'
     assert np.array_equal(clean[mapping==0],labels[mapping==0]),'Other region was modified'
-    assert clean[30,30]==4 and np.array_equal(clean[50],labels[50]),'Glint or thin ink lost'
+    assert clean[30,30]==4 and np.array_equal(clean[50],labels[50]),'Highlight or thin ink lost'
     assert clean[35,35]==2 and clean[10,63]==2,'Alpha/ownership boundary was crossed'
-    passed+=['local_cleanup','other_region_unchanged','ink_and_glint_protected','alpha_and_boundary_protected']
+    passed+=['local_cleanup','other_region_unchanged','ink_and_highlight_protected','alpha_and_boundary_protected']
     off=copy.deepcopy(regions);off[1].pop('cleanup')
     unchanged,_=clean_regions(labels,palette,alpha,mapping,off,plan['roles']);assert np.array_equal(unchanged,labels)
     passed.append('faithful_default_no_cleanup')

@@ -6,12 +6,12 @@ Read the current `palette.json` before choosing indices. Coordinates refer to `c
 {
   "title": "Reference reconstruction",
   "coordinate_size": [640, 960],
-  "checkpoints": [{"id": "leaf-edge", "box": [70,30,290,240], "critical": true}],
-  "default": {"id": "paper", "name": "Background paper", "base": "#fffaf3", "phase": "background"},
+  "checkpoints": [{"id": "key-detail", "box": [70,30,290,240], "critical": true}],
+  "default": {"id": "background", "name": "Background", "base": "#fffaf3", "phase": "background"},
   "roles": {"ink": [0]},
   "regions": [
     {
-      "id": "leaf-ornament", "name": "Leaf ornament",
+      "id": "main-shape", "name": "Main shape",
       "polygon": [[80,40],[300,50],[340,240],[100,250]],
       "include_colors": [0,2,3,4], "base": "#b6dab3", "phase": "color", "ink_order": 0,
       "roles": {"ink": [0], "shadow": [3], "highlight": [4]}
@@ -30,7 +30,7 @@ Read the current `palette.json` before choosing indices. Coordinates refer to `c
 - `ink_order` orders centerline strokes independently of final layering.
 - `construction` is a few Bézier guides that fade during painting; omit if misleading.
 
-Inspect coverage in `trace-report.json`; large unassigned foreground means an incomplete plan. Distinguish eyelid outlines from iris bodies and glints; dark clothes and foliage are not automatically ink.
+Inspect coverage in `trace-report.json`; large unassigned foreground means an incomplete plan. Distinguish true line art from dark fills and reflective highlights; dark clothing and vegetation are not automatically ink.
 
 ## Parameters
 
@@ -53,8 +53,8 @@ Regions may declare metadata without a polygon; ordered `assignments` refine own
 
 ```json
 {"assignments": [
-  {"region": "hanging-ivy", "polygon": [[0,0],[640,0],[640,960],[0,960]], "include_colors": [2,3], "only_from": ["backdrop"]},
-  {"region": "right-hand", "polygon": [[220,810],[300,820],[310,865],[225,862]], "include_colors": [4,5]}
+  {"region": "overlay-top", "polygon": [[0,0],[640,0],[640,960],[0,960]], "include_colors": [2,3], "only_from": ["backdrop"]},
+  {"region": "subject-detail", "polygon": [[220,810],[300,820],[310,865],[225,862]], "include_colors": [4,5]}
 ]}
 ```
 

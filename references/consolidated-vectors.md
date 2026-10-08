@@ -12,10 +12,10 @@ The plan uses the same schema and palette fingerprint as the faithful plan; regi
 
 ## Mechanics
 
-- `consolidate` merges near-duplicate palette colors per role with a pixel-count-weighted mean. Only `ink` consolidates by default; other roles keep the shared global palette (`role_merge_distances` 0), so a skin sliver in a mostly-white region cannot turn white. Explicit nonzero overrides are opt-in and need boundary inspection.
+- `consolidate` merges near-duplicate palette colors per role with a pixel-count-weighted mean. Only `ink` consolidates by default; other roles keep the shared global palette (`role_merge_distances` 0), so a small pale region cannot turn white. Explicit nonzero overrides are opt-in and need boundary inspection.
 - Merging the pale antialias transition pigments into their dominant neighbors is what removes the washed-out, slightly-light look of the faithful trace around edges and shadows.
 - `merge_fragments` reassigns tiny pigment islands to the nearest surviving local paint, never to transparency. Ink/detail/highlight use a lower discard threshold; a thin component survives via `keep_long`. If every component of a group is tiny, its largest representative is kept. Discarded ink pieces are recolored within compatible ink pigments, so a dotted-looking line stays one continuous ribbon.
-- `component_backings` paints detached edge pieces with the actual local pigment mean, not the region base: a pale glint must not inherit a dark outline color. Broad silhouettes keep the authored base color.
+- `component_backings` paints detached edge pieces with the actual local pigment mean, not the region base: a pale highlight must not inherit a dark outline color. Broad silhouettes keep the authored base color.
 - `close_small_holes` optionally repairs compact enclosed pinholes (`base_hole_area`, `ink_hole_area`; default OFF). Thin crescents and slits are real negative space and stay open.
 - Opaque sources get an opaque native canvas rect. Partial-alpha sources are rejected; use the faithful route there.
 - Output keeps the semantic `data-region`/`data-tone` groups, so `make_demo.py` replay works unchanged.

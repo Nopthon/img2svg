@@ -33,7 +33,7 @@ The delivered SVG and HTML have no runtime dependencies.
 
 Just ask your agent in natural language, for example:
 
-> Reconstruct `example.png` as an SVG (and also give me the drawing-replay demo).
+> Reconstruct `reference.png` as an SVG (and also give me the drawing-replay demo).
 
 The agent inspects the image, prepares a color palette, authors the plan, traces, compares renders, repairs defects, and returns the files. You do not run the scripts by hand.
 

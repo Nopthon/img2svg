@@ -67,7 +67,7 @@ def close_small_holes(mask,area):
     h,w=mask.shape
     for i in range(1,n):
         x,y,bw,bh,size=stats[i]
-        # Thin negative-space slivers between eyelid and iris are real gaps.
+        # Thin negative-space slivers between adjacent shapes are real gaps.
         # Only compact enclosed pinholes are eligible for an explicit repair.
         compact=max(bw,bh)/max(1,min(bw,bh))<=1.8 and size/(bw*bh)>=.35
         if size<=area and compact and x>0 and y>0 and x+bw<w and y+bh<h:take[i]=True
@@ -75,7 +75,7 @@ def close_small_holes(mask,area):
 
 def component_backings(mask,local,palette,owned,base=None,small_area=64):
     """Use the actual local pigment under detached edge pieces, not a dark
-    region-wide average. A white glint must not acquire the hair outline color.
+    region-wide average. A pale highlight must not acquire the outline color.
     Broad base silhouettes can retain the explicitly authored base color.
     """
     n,cc,stats,_=cv2.connectedComponentsWithStats(np.uint8(mask),8)
@@ -125,8 +125,8 @@ def main():
         protected=int(settings.get('protected_area',4));long=float(settings.get('keep_long',10))
         overrides=settings.get('role_merge_distances',{})
         if not isinstance(overrides,dict) or any(role not in TONES or not 0<=float(v)<=50 for role,v in overrides.items()):raise ValueError('Invalid role_merge_distances in '+r['id'])
-        # A shared skin/leaf pigment must not become white or a different green
-        # just because another semantic crop contains more paper/background.
+        # A shared fill pigment must not become white or a different hue
+        # just because another semantic crop contains more background.
         # Preserve global fill swatches by default; consolidate ink locally.
         # Explicit role overrides permit deliberate local fill simplification.
         role_distances={role:0. for role in TONES if role!='ink'}

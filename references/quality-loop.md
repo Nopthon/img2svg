@@ -5,7 +5,7 @@ Retain the first acceptable SVG. For each defect record crop, observation, hypot
 | Defect | Likely cause | Action |
 |---|---|---|
 | Object disappears or paints in the wrong phase | Ownership/role | Check overlay; repair polygon, filter or late assignment |
-| Eye/finger already wrong in quantized preview | Palette preparation | Adjust focus/colors/denoise; re-author stale palette IDs |
+| Detail already wrong in quantized preview | Palette preparation | Adjust focus/colors/denoise; re-author stale palette IDs |
 | Fine line lost only in SVG | Tolerance/overlap | Lower regional epsilon; inspect original-resolution crop |
 | Isolated dots on a flat patch | Noise or real texture | Compare the reference; selectively enable conservative cleanup |
 | Thick edges, halos, dark intersections | Overlap/compositing | Reduce regional overlap; check alpha and white-background RGB |
@@ -23,4 +23,4 @@ Enable cleanup only in a chosen region. It merges compact tiny opaque islands in
 
 ## Acceptance evidence
 
-Comparison includes the full render, critical crops and high-error tiles; RGB is measured on white, alpha separately, and edge recall/precision within two original pixels. These locate differences, not semantic correctness. After viewing, fill the review with feature-specific observations (e.g. "fringe glints stay separate; eyelid continuous; skin does not cross hair"). Use fail/unverified where appropriate; never infer passes from metrics. After geometry changes, regenerate comparison and update review hashes. When tools prevent further inspection, deliver the best result with specific unverified limits.
+Comparison includes the full render, critical crops and high-error tiles; RGB is measured on white, alpha separately, and edge recall/precision within two original pixels. These locate differences, not semantic correctness. After viewing, fill the review with feature-specific observations (e.g. "small highlights stay separate; outline continuous; adjacent fills do not bleed across a boundary"). Use fail/unverified where appropriate; never infer passes from metrics. After geometry changes, regenerate comparison and update review hashes. When tools prevent further inspection, deliver the best result with specific unverified limits.
