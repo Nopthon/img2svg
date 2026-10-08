@@ -7,6 +7,7 @@ import numpy as np
 from PIL import Image, ImageOps, ImageCms
 from svg_compat import NS, validate, write_svg
 from version import VERSION
+from quality import profile as quality_profile, resolve as resolve_fidelity
 
 ET.register_namespace('',NS)
 TONES=('background','color','shadow','highlight','detail','ink')
@@ -14,6 +15,29 @@ def node(name,attrs=None):return ET.Element('{'+NS+'}'+name,{k:str(v) for k,v in
 def save_json(path,data):Path(path).write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
 def color(c):return '#'+''.join(f'{int(v):02x}' for v in c)
 def palette_id(palette):return hashlib.sha256(np.asarray(palette,dtype=np.uint8).tobytes()).hexdigest()
+def despeckle_labels(labels,visible,min_area,palette,max_delta=45.0,passes=3):
+    """Merge connected color islands smaller than min_area into the dominant nearby
+    colour within max_delta RGB, so tiny antialias specks stop becoming contours."""
+    labels=labels.copy();palette=palette.astype(np.float32)
+    for _ in range(passes):
+        changed=0
+        for ci in np.unique(labels[visible]):
+            m=np.uint8((labels==ci)&visible)
+            count,components,stats,_=cv2.connectedComponentsWithStats(m,8)
+            for i in range(1,count):
+                if stats[i,cv2.CC_STAT_AREA]>=min_area:continue
+                comp=components==i
+                ring=cv2.dilate(comp.astype(np.uint8),np.ones((3,3),np.uint8))
+                near=labels[(ring>0)&~comp&visible];near=near[near!=ci]
+                if not len(near):continue
+                vals,counts=np.unique(near,return_counts=True)
+                target=None
+                for v in vals[np.argsort(-counts)]:
+                    if float(np.linalg.norm(palette[ci]-palette[v]))<=max_delta:target=v;break
+                if target is None:continue
+                labels[comp]=target;changed+=1
+        if not changed:break
+    return labels
 def image_rgba(path):
     im=ImageOps.exif_transpose(Image.open(path))
     profile=im.info.get('icc_profile');rgba=im.convert('RGBA')
@@ -27,6 +51,8 @@ def prepare(a):
     rgba=image_rgba(a.input);rgb=rgba[:,:,:3];alpha=rgba[:,:,3];h,w=alpha.shape
     visible=alpha>0
     if not visible.any():raise ValueError('Reference is fully transparent')
+    prof=quality_profile(a.fidelity) if getattr(a,'fidelity',None) else None
+    colors=a.colors if a.colors is not None else (prof['colors'] if prof else 80)
     smooth=cv2.bilateralFilter(rgb,5,a.denoise,3) if a.denoise else rgb
     lab=cv2.cvtColor(smooth,cv2.COLOR_RGB2LAB)
     step=a.sample_step or max(1,int(math.sqrt(h*w/320000)))
@@ -37,7 +63,7 @@ def prepare(a):
         if min(x,y)<0 or min(fw,fh)<=0 or x+fw>w or y+fh>h:raise ValueError('Focus box is outside reference')
         crop=lab[y:y+fh,x:x+fw][visible[y:y+fh,x:x+fw]][::max(1,step)]
         sample=np.concatenate([sample,crop.astype(np.float32)])
-    k=min(a.colors,len(np.unique(sample,axis=0)))
+    k=min(colors,len(np.unique(sample,axis=0)))
     cv2.setRNGSeed(a.seed)
     _,_,centres=cv2.kmeans(sample,k,None,(cv2.TERM_CRITERIA_EPS+cv2.TERM_CRITERIA_MAX_ITER,80,.05),3,cv2.KMEANS_PP_CENTERS)
     labels=np.zeros((h,w),np.uint16)
@@ -51,11 +77,12 @@ def prepare(a):
         c=np.round(rgb[m].mean(axis=0)).astype(np.uint8) if m.any() else np.array([0,0,0],np.uint8)
         palette.append(c);entries.append({'index':i,'hex':color(c),'pixels':int(m.sum()),'rgb':c.tolist()})
     palette=np.array(palette)
+    if prof and prof['label_min_area']>0:labels=despeckle_labels(labels,visible,prof['label_min_area'],palette)
     reconstructed=np.dstack([palette[labels],alpha])
     Image.fromarray(reconstructed).save(work/'quantized-preview.png')
     np.savez_compressed(work/'prepared.npz',labels=labels,palette=palette,alpha=alpha)
     save_json(work/'palette.json',{'width':w,'height':h,'fingerprint':palette_id(palette),'colors':entries})
-    report={'source':str(Path(a.input).resolve()),'source_sha256':hashlib.sha256(Path(a.input).read_bytes()).hexdigest(),'width':w,'height':h,'palette_size':k,'seed':a.seed,'denoise':a.denoise,'sample_step':step,'focus':a.focus,'palette_fingerprint':palette_id(palette),'toolkit_version':VERSION,'opencv':cv2.__version__,'numpy':np.__version__,'has_transparency':bool((alpha<255).any()),'quantization_rgb_mae':float(np.abs(rgb.astype(float)-palette[labels].astype(float))[visible].mean())}
+    report={'source':str(Path(a.input).resolve()),'source_sha256':hashlib.sha256(Path(a.input).read_bytes()).hexdigest(),'width':w,'height':h,'palette_size':k,'seed':a.seed,'denoise':a.denoise,'sample_step':step,'focus':a.focus,'fidelity':(prof['fidelity'] if prof else None),'label_min_area':(prof['label_min_area'] if prof else 0),'palette_fingerprint':palette_id(palette),'toolkit_version':VERSION,'opencv':cv2.__version__,'numpy':np.__version__,'has_transparency':bool((alpha<255).any()),'quantization_rgb_mae':float(np.abs(rgb.astype(float)-palette[labels].astype(float))[visible].mean())}
     save_json(work/'prepare-report.json',report);print(json.dumps(report,ensure_ascii=False))
 
 def remap_plan_indices(plan,source,target):
@@ -242,28 +269,40 @@ def role_for(region,ci,global_roles):
         if ci in ids:return role
     return region.get('phase','color')
 
-def merge_role_colors(palette,items,distance):
-    """Union near-identical palette colors within one role and map each to the
-    pixel-count-weighted mean, so pale near-duplicate pigments paint as one color."""
-    parent=list(range(len(items)))
+def collapse_palette(labels,palette,plan,distance):
+    """Merge same-role palette colours within `distance` RGB into one mask, so the
+    merged shade geometry becomes one path instead of one per band. Returns the
+    relabelled map, a {representative_index: hex} paint override, and how many
+    palette indices were folded away."""
+    if distance<=0:return labels,{},0
+    k=len(palette);role_of=['color']*k
+    for role,ids in plan.get('roles',{}).items():
+        for i in ids:
+            if 0<=i<k:role_of[i]=role
+    parent=list(range(k))
     def find(x):
         while parent[x]!=x:parent[x]=parent[parent[x]];x=parent[x]
         return x
-    for i in range(len(items)):
-        for j in range(i+1,len(items)):
-            a,b=items[i][0],items[j][0]
-            if float(np.linalg.norm(palette[a].astype(float)-palette[b].astype(float)))<=distance:
-                ra,rb=find(i),find(j)
-                if ra!=rb:parent[rb]=ra
+    for i in range(k):
+        for j in range(i+1,k):
+            if role_of[i]==role_of[j] and float(np.linalg.norm(palette[i].astype(float)-palette[j].astype(float)))<=distance:
+                ri,rj=find(i),find(j)
+                if ri!=rj:parent[rj]=ri
+    counts=np.bincount(labels.ravel(),minlength=k).astype(float)
     groups={}
-    for i,(ci,cnt) in enumerate(items):groups.setdefault(find(i),[]).append((ci,cnt))
-    result={}
+    for i in range(k):groups.setdefault(find(i),[]).append(i)
+    paint={};remap={}
     for members in groups.values():
-        total=sum(c for _,c in members) or 1
-        mean=np.rint(sum(palette[ci].astype(float)*c for ci,c in members)/total).astype(np.uint8)
-        hexc=color(mean)
-        for ci,_ in members:result[ci]=hexc
-    return result
+        if len(members)<2:continue
+        rep=max(members,key=lambda ci:counts[ci])
+        total=sum(counts[ci] for ci in members) or 1
+        mean=np.rint(sum(palette[ci].astype(float)*counts[ci] for ci in members)/total).astype(np.uint8)
+        for ci in members:remap[ci]=rep
+        paint[rep]=color(mean)
+    if not remap:return labels,{},0
+    out=labels.copy()
+    for ci,rep in remap.items():out[labels==ci]=rep
+    return out,paint,len(remap)
 
 def path_data(points):
     p=np.asarray(points).reshape(-1,2).astype(float)/2+.25
@@ -351,27 +390,18 @@ def line_art(mask,mapping,regions,w,h,path):
 def trace(a):
     plan=json.loads(Path(a.plan).read_text(encoding='utf-8-sig'))
     labels,palette,alpha,regions,mapping=load_prepared(a.work,plan);h,w=labels.shape
+    labels,paint_override,merged_count=collapse_palette(labels,palette,plan,a.merge_colors)
     from region_cleanup import clean_regions
     labels,cleanup=clean_regions(labels,palette,alpha,mapping,regions,plan.get('roles',{}))
     root=node('svg',{'id':'illustration','version':'1.1','width':w,'height':h,'viewBox':f'0 0 {w} {h}','preserveAspectRatio':'xMidYMid meet'})
     title=node('title');title.text=plan.get('title','Reference reconstruction');root.append(title)
     artwork=node('g',{'id':'artwork'});root.append(artwork)
-    vertex_count=contour_count=path_count=0;ink_mask=np.zeros((h,w),bool);coverage=[];merged_colors=set()
+    vertex_count=contour_count=path_count=0;ink_mask=np.zeros((h,w),bool);coverage=[]
     packed=labels.astype(np.uint32)*256+alpha.astype(np.uint32)
     for ri,r in enumerate(regions):
         group=node('g',{'id':r['id'],'data-region':r['id'],'data-name':r.get('name',r['id']),'data-base':r['base'],'data-order':ri/max(1,len(regions)-1)})
         covered=(mapping==ri)&(alpha>0);coverage.append({'id':r['id'],'pixels':int(covered.sum())})
         if not covered.any():continue
-        rep={}
-        if a.merge_colors>0:
-            vals,counts=np.unique(packed[covered],return_counts=True);by_role={}
-            for code,cnt in zip(vals.tolist(),counts.tolist()):
-                ci=code//256;role=role_for(r,ci,plan.get('roles',{}))
-                role_counts=by_role.setdefault(role,{});role_counts[ci]=role_counts.get(ci,0)+int(cnt)
-            for items in by_role.values():
-                for ci,hexc in merge_role_colors(palette,list(items.items()),a.merge_colors).items():
-                    rep[ci]=hexc
-                    if hexc!=color(palette[ci]):merged_colors.add(ci)
         pigment={tone:[] for tone in TONES}
         for code in np.unique(packed[covered]):
             ci=int(code)//256;opacity=int(code)%256
@@ -384,7 +414,7 @@ def trace(a):
             d,vertices,contours=contours_to_path(np.uint8(m)*255,min(epsilon,.2) if opacity<255 else epsilon)
             if not d:continue
             width=.55 if role=='ink' or opacity<255 else overlap
-            paint=rep.get(ci,color(palette[ci]))
+            paint=paint_override.get(ci,color(palette[ci]))
             attrs={'id':f'{r["id"]}-{role}-c{ci}-a{opacity}','fill':paint,'stroke':paint,'stroke-width':f'{width:g}','stroke-linejoin':'round','stroke-linecap':'round','fill-rule':'evenodd','d':d}
             if opacity<255:attrs['opacity']=f'{opacity/255:.6f}'
             pigment[role].append((float(palette[ci].mean()),node('path',attrs)))
@@ -402,24 +432,42 @@ def trace(a):
             from stroke_replay import make_lines
             strokes=make_lines(ink_mask,mapping,regions,w,h,a.line_art,plan.get('replay',{}))
     else:strokes=None
-    report={'width':w,'height':h,'native_paths':path_count,'connected_contours':contour_count,'vertices':vertex_count,'pencil_strokes':strokes,'pencil_mode':a.pencil_mode,'svg_bytes':Path(a.output).stat().st_size,'region_coverage':coverage,'cleanup':cleanup,'palette_fingerprint':palette_id(palette),'plan_sha256':hashlib.sha256(Path(a.plan).read_bytes()).hexdigest(),'epsilon':a.epsilon,'overlap':a.overlap,'toolkit_version':VERSION,'merge_colors':a.merge_colors,'merged_color_indices':len(merged_colors),'limits':{'max_bytes':a.max_bytes,'max_paths':a.max_paths},'oversize':[],'note':'Appearance contours and reconstructed replay strokes are separate; visual QA is required.'}
+    report={'width':w,'height':h,'native_paths':path_count,'connected_contours':contour_count,'vertices':vertex_count,'pencil_strokes':strokes,'pencil_mode':a.pencil_mode,'svg_bytes':Path(a.output).stat().st_size,'region_coverage':coverage,'cleanup':cleanup,'palette_fingerprint':palette_id(palette),'plan_sha256':hashlib.sha256(Path(a.plan).read_bytes()).hexdigest(),'epsilon':a.epsilon,'overlap':a.overlap,'toolkit_version':VERSION,'fidelity':getattr(a,'fidelity',None),'merge_colors':a.merge_colors,'merged_color_indices':merged_count,'limits':{'max_bytes':a.max_bytes,'max_paths':a.max_paths},'oversize':[],'note':'Appearance contours and reconstructed replay strokes are separate; visual QA is required.'}
     if a.max_paths>0 and path_count>a.max_paths:report['oversize'].append({'kind':'paths','value':path_count,'limit':a.max_paths})
     if a.max_bytes>0 and report['svg_bytes']>a.max_bytes:report['oversize'].append({'kind':'bytes','value':report['svg_bytes'],'limit':a.max_bytes})
     for item in report['oversize']:
         print(f"oversize: {item['kind']} {item['value']} exceeds limit {item['limit']}; discuss the fidelity/size tradeoff before delivering",file=sys.stderr)
     save_json(Path(a.work)/'trace-report.json',report);print(json.dumps(report,ensure_ascii=False))
 
+def auto(a):
+    """One-click, agent-free pipeline: prepare -> draft-plan -> trace (+demo).
+    A single --fidelity value drives every stage's fidelity/size tradeoff."""
+    prof=quality_profile(a.fidelity)
+    out=Path(a.output);work=Path(a.work) if a.work else out/'work'
+    prepare(argparse.Namespace(input=a.input,work=str(work),colors=None,denoise=12,seed=41,focus=[],sample_step=None,fidelity=a.fidelity))
+    draft_plan(argparse.Namespace(work=str(work),output=str(work/'plan.json'),min_area=max(4,prof['label_min_area']),epsilon=prof['epsilon'],max_regions=0,ink_threshold=0))
+    trace(argparse.Namespace(work=str(work),plan=str(work/'plan.json'),output=str(out/'illustration.svg'),line_art=str(work/'line-art.svg'),epsilon=prof['epsilon'],overlap=prof['overlap'],pencil_mode='connected',max_bytes=a.max_bytes,max_paths=a.max_paths,merge_colors=prof['merge_distance'],fidelity=a.fidelity))
+    demo=None
+    if getattr(a,'demo',False):
+        import subprocess
+        subprocess.run([sys.executable,str(Path(__file__).resolve().parent/'make_demo.py'),str(out/'illustration.svg'),'--line-art',str(work/'line-art.svg'),'--plan',str(work/'plan.json'),'--output',str(out/'index.html')],check=True)
+        demo=str((out/'index.html').resolve())
+    print(json.dumps({'auto':str(out.resolve()),'work':str(work.resolve()),'fidelity':prof['fidelity'],'colors':prof['colors'],'epsilon':prof['epsilon'],'merge_distance':prof['merge_distance'],'demo':demo},ensure_ascii=False))
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--version',action='version',version='img2svg '+VERSION)
     sub=parser.add_subparsers(dest='command',required=True)
-    p=sub.add_parser('prepare');p.add_argument('input');p.add_argument('--work',required=True);p.add_argument('--colors',type=int,default=80);p.add_argument('--denoise',type=float,default=12);p.add_argument('--seed',type=int,default=41);p.add_argument('--focus',action='append',default=[]);p.add_argument('--sample-step',type=int)
-    p=sub.add_parser('trace');p.add_argument('--work',required=True);p.add_argument('--plan',required=True);p.add_argument('--output',required=True);p.add_argument('--line-art');p.add_argument('--epsilon',type=float,default=.55);p.add_argument('--overlap',type=float,default=1.4);p.add_argument('--pencil-mode',choices=['connected','legacy'],default='connected');p.add_argument('--max-bytes',type=int,default=0);p.add_argument('--max-paths',type=int,default=0);p.add_argument('--merge-colors',type=int,default=0)
+    p=sub.add_parser('prepare');p.add_argument('input');p.add_argument('--work',required=True);p.add_argument('--colors',type=int);p.add_argument('--denoise',type=float,default=12);p.add_argument('--seed',type=int,default=41);p.add_argument('--focus',action='append',default=[]);p.add_argument('--sample-step',type=int);p.add_argument('--fidelity')
+    p=sub.add_parser('trace');p.add_argument('--work',required=True);p.add_argument('--plan',required=True);p.add_argument('--output',required=True);p.add_argument('--line-art');p.add_argument('--epsilon',type=float);p.add_argument('--overlap',type=float);p.add_argument('--pencil-mode',choices=['connected','legacy'],default='connected');p.add_argument('--max-bytes',type=int,default=0);p.add_argument('--max-paths',type=int,default=0);p.add_argument('--merge-colors',type=int);p.add_argument('--fidelity')
     p=sub.add_parser('palette-merge');p.add_argument('work');p.add_argument('--from',dest='source',type=int,required=True);p.add_argument('--into',dest='target',type=int,required=True);p.add_argument('--plan');p.add_argument('--plan-out')
     p=sub.add_parser('draft-plan');p.add_argument('--work',required=True);p.add_argument('--output',required=True);p.add_argument('--min-area',type=int,default=12);p.add_argument('--epsilon',type=float,default=1.5);p.add_argument('--max-regions',type=int,default=0);p.add_argument('--ink-threshold',type=int,default=0)
+    p=sub.add_parser('auto');p.add_argument('input');p.add_argument('--output',required=True);p.add_argument('--work');p.add_argument('--fidelity',default='balanced');p.add_argument('--demo',action='store_true');p.add_argument('--max-bytes',type=int,default=0);p.add_argument('--max-paths',type=int,default=0)
     a=parser.parse_args()
     if a.command=='prepare':
-        if not 1<=a.colors<=256 or a.denoise<0 or (a.sample_step is not None and a.sample_step<1):parser.error('colors 1..256; denoise >= 0; sample-step >= 1')
+        if a.colors is not None and not 1<=a.colors<=256:parser.error('colors 1..256')
+        if a.denoise<0 or (a.sample_step is not None and a.sample_step<1):parser.error('denoise >= 0; sample-step >= 1')
+        if a.fidelity is not None:resolve_fidelity(a.fidelity)
         prepare(a)
     elif a.command=='palette-merge':
         if a.source<0 or a.target<0:parser.error('palette indices must be >= 0')
@@ -427,10 +475,17 @@ def main():
     elif a.command=='draft-plan':
         if a.min_area<1 or not 0<=a.epsilon<=4 or a.max_regions<0 or not 0<=a.ink_threshold<=255:parser.error('draft-plan: min-area >= 1, 0 <= epsilon <= 4, max-regions >= 0, 0 <= ink-threshold <= 255')
         draft_plan(a)
+    elif a.command=='auto':
+        if a.max_bytes<0 or a.max_paths<0:parser.error('max-bytes/max-paths must be >= 0; 0 disables the limit')
+        auto(a)
     else:
+        prof=quality_profile(a.fidelity) if a.fidelity else None
+        if a.epsilon is None:a.epsilon=prof['epsilon'] if prof else .55
+        if a.overlap is None:a.overlap=prof['overlap'] if prof else 1.4
+        if a.merge_colors is None:a.merge_colors=prof['merge_distance'] if prof else 0
         if not 0<=a.epsilon<=2 or not 0<=a.overlap<=3:parser.error('epsilon 0..2; overlap 0..3')
-        if a.max_bytes<0 or a.max_paths<0 or a.merge_colors<0:parser.error('max-bytes/max-paths must be >= 0; 0 disables the limit; merge-colors >= 0')
         if not 0<=a.merge_colors<=60:parser.error('merge-colors must be 0..60')
+        if a.max_bytes<0 or a.max_paths<0:parser.error('max-bytes/max-paths must be >= 0; 0 disables the limit')
         trace(a)
 if __name__=='__main__':
     if hasattr(sys.stdout,'reconfigure'):sys.stdout.reconfigure(encoding='utf-8')

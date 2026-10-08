@@ -31,11 +31,21 @@ The delivered SVG and HTML have no runtime dependencies.
 
 ## Usage
 
-Just ask your agent in natural language, for example:
+Two ways, same engine:
 
-> Reconstruct `reference.png` as an SVG (and also give me the drawing-replay demo).
+- **As a skill (best quality):** ask your agent in natural language, for example:
 
-The agent inspects the image, prepares a color palette, authors the plan, traces, compares renders, repairs defects, and returns the files. You do not run the scripts by hand.
+  > Reconstruct `reference.png` as an SVG (and also give me the drawing-replay demo).
+
+  The agent inspects the image, prepares a color palette, authors the plan, traces, compares renders, repairs defects, and returns the files. You do not run the scripts by hand.
+
+- **As a plain CLI (no agent):** run the whole pipeline in one command:
+
+  ```text
+  python scripts/vectorize.py auto "reference.png" --output outputs --fidelity balanced --demo
+  ```
+
+`--fidelity 0..100` (or `faithful`/`balanced`/`compact`) is a single axis trading detail for file size, applied across `prepare`, `trace` and `auto`: `faithful` keeps every contour, `compact` merges shades and coarsens contours.
 
 ## How it works
 

@@ -114,6 +114,11 @@ def main():
     run('vectorize.py','trace','--work',work,'--plan',work/'plan.json','--output',work/'limited2.svg','--line-art',work/'limited2-lines.svg')
     assert (work/'limited2.svg').read_bytes()==(work/'illustration.svg').read_bytes(),'Limits or report changes altered final geometry'
     passed+=['oversize_reported','limits_preserve_geometry']
+    # Fidelity axis trades detail for size across stages.
+    run('vectorize.py','trace','--work',work,'--plan',work/'plan.json','--output',work/'faith.svg','--fidelity','faithful')
+    run('vectorize.py','trace','--work',work,'--plan',work/'plan.json','--output',work/'compact.svg','--fidelity','compact')
+    assert (work/'compact.svg').stat().st_size<=(work/'faith.svg').stat().st_size,'Compact fidelity did not reduce size'
+    passed.append('fidelity_axis')
     report={'passed':passed,'cleanup':reports,'synthetic_comparison':result['global'],'note':'Automated invariants; real-image visual inspection remains separate.'}
     (work/'quality-test-report.json').write_text(json.dumps(report,indent=2),encoding='utf-8');print(json.dumps(report))
 if __name__=='__main__':main()

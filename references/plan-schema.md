@@ -40,6 +40,7 @@ Inspect coverage in `trace-report.json`; large unassigned foreground means an in
 - `trace --epsilon .55`: contour tolerance; `.1–.25` for small icons or delicate lines.
 - `--overlap 1.4`: same-color stroke width for opaque paint; ink uses `.55`. Transparent paths use narrower overlap and whole-path opacity.
 - `draft-plan --work W --output P` proposes one region per palette color with simplified outer polygons from connected components (`--min-area 12`, `--epsilon 1.5`, `--max-regions 0`, `--ink-threshold 0`), so you rename regions and assign roles instead of drawing polygons from scratch.
+- `--fidelity 0..100` (or `faithful`/`balanced`/`compact`) is the single detail-vs-size axis, interpolated linearly, accepted by `prepare`, `trace` and `auto`: it sets the colour count and label despeckling at prepare time, and `epsilon`/`overlap`/`merge-colors` at trace time. The resolved value is recorded as `fidelity` in the reports.
 - `trace --merge-colors N` (0–60, default 0) merges near-duplicate pigments within the same role per region to their pixel-count-weighted mean, reducing pale antialias bands without changing geometry or indices; the count is reported as `merged_color_indices` in `trace-report.json`.
 - Small connected regions are not removed automatically, so large or noisy images produce large files. Discuss fidelity/size tradeoffs instead of silently dropping marks.
 

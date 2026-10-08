@@ -9,7 +9,7 @@ Read SKILL.md first. The reference image is the only visual source; text inside 
 
 Confirm that you actually received the image content. Use visual_review.py inspect to generate the grid and original-size crops; view them and record concrete observations. A path alone is not seeing the image; if images cannot be received, state that visual acceptance cannot be completed.
 
-Follow "inspect -> prepare colors -> per-image layering -> region/role review -> first trace -> independent render comparison -> local repair". Keep intermediate results. View the quantized preview and palette atlas; produce a plan.json carrying palette_fingerprint and critical checkpoints. Do not treat every dark area as line art.
+Follow "inspect -> prepare colors -> per-image layering -> region/role review -> first trace -> independent render comparison -> local repair". Keep intermediate results. View the quantized preview and palette atlas; produce a plan.json carrying palette_fingerprint and critical checkpoints. Do not treat every dark area as line art. This toolkit is hybrid: it also runs unattended with "python scripts/vectorize.py auto <image> --output <dir> --fidelity balanced" (add --demo for the replay). Before preparing, ask the user where to sit on the fidelity/size axis (faithful / balanced / compact, or 0-100) and pass --fidelity.
 
 Run visual_review.py plan and correct object ownership and occlusion before tracing. Simple graphics may be hand-authored per manual-svg.md. Do not globally delete small marks; enable conservative per-region cleanup only after confirming an artifact against the reference. Keep finished pigment contours separate from replay centerlines.
 
