@@ -34,7 +34,7 @@ Inspect coverage in `trace-report.json`; large unassigned foreground means an in
 
 ## Parameters
 
-- `prepare --colors 80` (range 1–256): fewer for icons, more for gradients.
+- `prepare --colors N` (range 1–256) overrides the fidelity-derived colour count; fewer for icons, more for gradients.
 - `--denoise 12`: bilateral filtering for palette assignment; `0` for crisp pixel art. Palette RGB is recomputed from original pixels.
 - Repeat `--focus x,y,w,h` (original pixels) to weight important areas.
 - `trace --epsilon .55`: contour tolerance; `.1–.25` for small icons or delicate lines.

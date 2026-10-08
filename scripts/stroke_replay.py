@@ -1,5 +1,4 @@
 """Continuous replay centerlines; does not replace the faithful final ink geometry."""
-import math
 import cv2
 import numpy as np
 from vectorize import skeletonize,node,write_svg

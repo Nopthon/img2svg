@@ -31,7 +31,7 @@ Commands are relative to the skill folder; working/output paths belong in the ta
 
 1. **Inspect.** `python scripts/visual_review.py inspect "reference.png" --output "work/inspection"`
    Open `overview-grid.png` and relevant tiles through an image tool. Optional `--roi eyes:100,120,240,160`. Record concrete observations.
-2. **Prepare.** `python scripts/vectorize.py prepare "reference.png" --work "work/palette" --colors 80`
+2. **Prepare.** `python scripts/vectorize.py prepare "reference.png" --work "work/palette"`
    Inspect the quantized preview. `--focus x,y,w,h` weights focal detail; `--denoise 0` suits crisp diagrams. `--fidelity` sets the colour count and label despeckling (see Fidelity vs size). Re-preparing can change palette indices.
 3. **Plan.** Read [plan-schema.md](references/plan-schema.md). For a starting skeleton run `python scripts/vectorize.py draft-plan --work "work/palette" --output "work/plan.json"`: it proposes one region per palette color with simplified polygons from connected components, which you then rename and give roles. Merge near-duplicate palette colors first with `python scripts/vectorize.py palette-merge "work/palette" --from I --into J --plan "work/plan.json"` (indices stay stable through tombstones). Then author regions, color roles, ownership exceptions, ink order and checkpoints, and copy the palette fingerprint. Dark clothing and vegetation are not automatically ink.
 4. **Inspect the plan.** `python scripts/visual_review.py plan "reference.png" --work "work/palette" --plan "work/plan.json" --output "work/plan-review"`
@@ -55,4 +55,4 @@ python scripts/render_check.py "outputs/illustration.svg" --png work/independent
 
 Use literal six-digit hex and visible geometry, not CSS variables, currentColor, script-dependent paint or `use` references. After changing toolkit code, run `self_test.py` and `quality_test.py` with separate scratch `--work` directories.
 
-Deliver the complete SVG, requested HTML and ZIP without analysis images. [PROMPT.md](PROMPT.md) supports agents without skill discovery. State tested limits.
+Deliver the complete SVG and requested HTML without analysis images. [PROMPT.md](PROMPT.md) supports agents without skill discovery. State tested limits.

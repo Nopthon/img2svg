@@ -8,7 +8,6 @@ This repository is an **AI-agent skill**. The agent interprets your image and au
 
 - `illustration.svg` — the reconstructed artwork as SVG.
 - `index.html` — optional single-file, offline replay: sketch → line art → base color → shadow → highlight → finish, with play, pause, seek and speed control.
-- `drawing-demo.zip` — the above, packaged.
 
 ## Install
 
