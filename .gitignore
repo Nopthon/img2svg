@@ -1,0 +1,6 @@
+# Intermediate / generated artifacts
+__pycache__/
+*.pyc
+work/
+outputs/
+*.zip

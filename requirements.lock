@@ -1,0 +1,6 @@
+# Tested exact versions used to validate this toolkit (self_test.py + quality_test.py).
+# requirements.txt keeps lower bounds; install this file to reproduce the validated environment.
+numpy==2.5.2
+opencv-python-headless==5.0.0.93
+pillow==12.3.0
+pymupdf==1.28.2
