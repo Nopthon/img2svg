@@ -3,7 +3,7 @@
 No third-party dependencies. Not a general browser CSS engine. Unsupported
 selectors, symbols and external references fail instead of silently changing art.
 """
-import argparse, copy, json, re
+import argparse, copy, json, re, math
 from pathlib import Path
 import xml.etree.ElementTree as ET
 from version import VERSION
@@ -14,15 +14,19 @@ INHERITED={'fill','stroke','color','fill-rule','clip-rule','stroke-width','strok
 SHAPES={'path','rect','circle','ellipse','polygon','polyline','line'}
 RESOURCES={'linearGradient','radialGradient'}
 UNSUPPORTED_RESOURCES={'clipPath','mask','filter','pattern','symbol'}
-ANIMATION_IDS={'flat-color-layer','construction-layer','line-art-layer','background-underpainting','demo-flat-colors','demo-guides','demo-pencil'}
+ELEMENTS=SHAPES|RESOURCES|{'svg','g','defs','title','desc','metadata','stop'}
+ATTRIBUTES=INHERITED|{
+    'id','version','viewBox','preserveAspectRatio','width','height','x','y',
+    'x1','y1','x2','y2','cx','cy','r','rx','ry','fx','fy','fr','d','points',
+    'transform','opacity','display','pathLength','offset','stop-color',
+    'stop-opacity','gradientUnits','gradientTransform','spreadMethod','href',
+    'vector-effect','shape-rendering','color-interpolation','color-rendering',
+    'overflow','role','focusable',
+}
 
 def tag(e):return e.tag.rsplit('}',1)[-1]
 def load_svg(path):
     text=Path(path).read_text(encoding='utf-8-sig')
-    if Path(path).suffix.lower() in ('.html','.htm'):
-        found=re.search(r'<svg\b[^>]*\bid="illustration"[\s\S]*?</svg>',text)
-        if not found:raise ValueError('HTML must contain SVG id="illustration"')
-        text=found.group(0)
     if re.search(r'<!DOCTYPE|<!ENTITY',text,re.I):raise ValueError('DTD/entities are not supported')
     root=ET.fromstring(text)
     if tag(root)!='svg':raise ValueError('Expected SVG root')
@@ -36,17 +40,11 @@ def literal(value, variables):
         if value is None:raise ValueError('CSS variable has no resolvable value/fallback')
     raise ValueError('Cyclic CSS variable')
 
-def normalize(root, final_demo=False):
+def normalize(root):
     root=copy.deepcopy(root)
     for e in root.iter():
         if tag(e)=='style' and (e.text or '').strip():raise ValueError('Resolve stylesheet selectors before normalization; inline presentation attributes required')
         if tag(e) in {'image','foreignObject','script','animate','animateTransform','set'}:raise ValueError('Raster, foreign content, or animation is not a portable static SVG')
-    if final_demo:
-        for parent in root.iter():
-            for child in list(parent):
-                if child.get('id') in ANIMATION_IDS:parent.remove(child)
-        for e in root.iter():
-            if e.get('data-tone') is not None:e.attrib.pop('opacity',None)
     lookup={e.get('id'):e for e in root.iter() if e.get('id')}
     serial=[0]
 
@@ -116,13 +114,25 @@ def normalize(root, final_demo=False):
     return out
 
 def validate(root):
+    if root.tag!='{'+NS+'}svg':raise ValueError('Expected SVG namespace and root')
     ids=[];paints=set();paths=0
     for e in root.iter():
         kind=tag(e)
-        if kind in {'use','image','foreignObject','style','script','animate','animateTransform','set','text','symbol','clipPath','filter','mask','pattern'}:
+        if e.tag!='{'+NS+'}'+kind or kind not in ELEMENTS:
             raise ValueError('Outside this portable SVG profile: '+kind)
         if e.get('id'):ids.append(e.get('id'))
         for key,val in e.attrib.items():
+            local=key.rsplit('}',1)[-1]
+            if local.lower().startswith('on'):raise ValueError('SVG event attributes are not static: '+key)
+            if key.startswith('{'):
+                if key not in {'{http://www.w3.org/1999/xlink}href','{http://www.w3.org/XML/1998/namespace}space','{http://www.w3.org/XML/1998/namespace}lang'}:
+                    raise ValueError('Unsupported attribute namespace: '+key)
+            elif key not in ATTRIBUTES and not re.fullmatch(r'(data|aria)-[a-z][a-z0-9-]*',key):
+                raise ValueError('Unsupported SVG attribute: '+key)
+            if local=='href' and kind not in RESOURCES:raise ValueError('Only gradients may reference other gradients')
+            if key in {'opacity','fill-opacity','stroke-opacity','stop-opacity'}:
+                number=float(val)
+                if not math.isfinite(number) or not 0<=number<=1:raise ValueError('Opacity must be finite and within 0..1')
             if key=='style':raise ValueError('Inline CSS must be resolved to presentation attributes')
             if 'var(' in val or val=='currentColor' or 'base64' in val.lower():raise ValueError('Nonliteral SVG dependency: '+key)
             if key.endswith('href') and not val.startswith('#'):raise ValueError('External reference')
@@ -138,25 +148,37 @@ def validate(root):
                     raise ValueError('Unsupported paint: '+val)
                 if val.startswith('#'):paints.add(val)
     if len(set(ids))!=len(ids):raise ValueError('Duplicate SVG IDs')
+    lookup={e.get('id'):e for e in root.iter() if e.get('id')}
+    gradient_links={}
     for e in root.iter():
-        for v in e.attrib.values():
+        for key,v in e.attrib.items():
             for ref in re.findall(r'url\(#([^)]*)\)',v):
-                if ref not in ids:raise ValueError('Missing paint/clip reference '+ref)
+                if ref not in lookup or tag(lookup[ref]) not in RESOURCES:raise ValueError('Expected local gradient reference '+ref)
+            if key.endswith('href'):
+                ref=v[1:]
+                if ref not in lookup or tag(lookup[ref]) not in RESOURCES:raise ValueError('Expected local gradient reference '+ref)
+                gradient_links[id(e)]=id(lookup[ref])
+    for start in gradient_links:
+        seen=set();current=start
+        while current in gradient_links:
+            if current in seen:raise ValueError('Cyclic gradient reference')
+            seen.add(current);current=gradient_links[current]
     dims=[float(v) for v in re.split(r'[\s,]+',root.get('viewBox','').strip()) if v]
-    if len(dims)!=4 or dims[2]<=0 or dims[3]<=0:raise ValueError('Positive viewBox required')
+    if len(dims)!=4 or not all(map(math.isfinite,dims)) or dims[2]<=0 or dims[3]<=0:raise ValueError('Finite positive viewBox required')
     return {'native_shapes':paths,'literal_colors':len(paints),'unique_ids':len(ids),'viewBox':dims}
 
 def write_svg(root,path):
+    validate(root)
     Path(path).parent.mkdir(parents=True,exist_ok=True)
     ET.ElementTree(root).write(path,encoding='utf-8',xml_declaration=True)
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--version',action='version',version='img2svg '+VERSION)
-    p.add_argument('input');p.add_argument('--output');p.add_argument('--final-demo',action='store_true');p.add_argument('--check',action='store_true')
+    p.add_argument('input');p.add_argument('--output');p.add_argument('--check',action='store_true')
     a=p.parse_args();root=load_svg(a.input)
     if not a.check:
         if not a.output:p.error('--output required unless --check')
-        root=normalize(root,a.final_demo);write_svg(root,a.output)
+        root=normalize(root);write_svg(root,a.output)
     print(json.dumps(validate(root),ensure_ascii=False))
 if __name__=='__main__':main()

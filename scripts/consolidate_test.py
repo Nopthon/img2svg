@@ -29,7 +29,7 @@ def main():
         np.savez_compressed(dst/'prepared.npz',labels=labels,palette=palette,alpha=alphas)
         (dst/'plan.json').write_text(json.dumps({'coordinate_size':[w,h],'palette_fingerprint':fp,'default':{'id':'scene','name':'Scene','base':'#faf5eb','phase':'background'},'roles':{'ink':[2,3],'color':[1],'highlight':[5]}}),encoding='utf-8')
     scene(work,alpha)
-    run('consolidate_trace.py','--work',work,'--plan',work/'plan.json','--output',work/'consolidated.svg','--line-art',work/'lines.svg')
+    run('consolidate_trace.py','--work',work,'--plan',work/'plan.json','--output',work/'consolidated.svg')
     svg=(work/'consolidated.svg').read_text(encoding='utf-8')
     report=json.loads((work/'consolidated.consolidate-report.json').read_text(encoding='utf-8'))
     assert report['mode']=='consolidated' and report['input_palette']==fp and report['toolkit_version']==VERSION
@@ -49,7 +49,7 @@ def main():
     assert np.linalg.norm(px(20,52)-[127,191,137])<45,'Broad light paint patch was not preserved'
     assert px(15,70).min()>200,'Protected highlight was destroyed'
     assert np.linalg.norm(px(64,10)-[250,245,235])<45,'Background base drifted'
-    assert any(n.get('data-region')=='scene' for n in load_svg(work/'consolidated.svg').iter()),'Semantic region groups missing for replay'
+    assert any(n.get('data-region')=='scene' for n in load_svg(work/'consolidated.svg').iter()),'Semantic region groups missing'
     passed+=['ink_consolidation','island_removal','role_palette_preserved','protected_highlight','opaque_canvas','semantic_regions']
     # Partial alpha must be rejected, not silently flattened.
     w2=work/'alpha-case';w2.mkdir()
@@ -58,11 +58,9 @@ def main():
     rejected=run('consolidate_trace.py','--work',w2,'--plan',w2/'plan.json','--output',w2/'consolidated.svg',expected=1)
     assert 'opaque' in rejected.stderr,'Partial-alpha source was not rejected with guidance'
     passed.append('partial_alpha_rejected')
-    # Replay demo must accept consolidated output; faithful route must stay available on the same work.
-    run('make_demo.py',work/'consolidated.svg','--output',work/'index.html')
     run('vectorize.py','trace','--work',work,'--plan',work/'plan.json','--output',work/'faithful.svg')
     faithful=(work/'faithful.svg').read_text(encoding='utf-8')
     assert '#7fbf89' in faithful,'Faithful trace no longer keeps the antialias tint'
-    passed+=['demo_accepts_consolidated','faithful_route_unchanged']
+    passed.append('faithful_route_unchanged')
     print(json.dumps({'passed':passed,'work':str(work)}))
 if __name__=='__main__':main()

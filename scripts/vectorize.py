@@ -7,6 +7,7 @@ import numpy as np
 from PIL import Image, ImageOps, ImageCms
 from svg_compat import NS, validate, write_svg
 from version import VERSION
+from state_files import replace_files
 from quality import profile as quality_profile, resolve as resolve_fidelity
 
 ET.register_namespace('',NS)
@@ -26,16 +27,20 @@ def despeckle_labels(labels,visible,min_area,palette,max_delta=45.0,passes=3):
             count,components,stats,_=cv2.connectedComponentsWithStats(m,8)
             for i in range(1,count):
                 if stats[i,cv2.CC_STAT_AREA]>=min_area:continue
-                comp=components==i
+                x,y,w,h,_=map(int,stats[i])
+                x0,y0=max(0,x-1),max(0,y-1)
+                x1,y1=min(labels.shape[1],x+w+1),min(labels.shape[0],y+h+1)
+                local=labels[y0:y1,x0:x1]
+                comp=components[y0:y1,x0:x1]==i
                 ring=cv2.dilate(comp.astype(np.uint8),np.ones((3,3),np.uint8))
-                near=labels[(ring>0)&~comp&visible];near=near[near!=ci]
+                near=local[(ring>0)&~comp&visible[y0:y1,x0:x1]];near=near[near!=ci]
                 if not len(near):continue
                 vals,counts=np.unique(near,return_counts=True)
                 target=None
                 for v in vals[np.argsort(-counts)]:
                     if float(np.linalg.norm(palette[ci]-palette[v]))<=max_delta:target=v;break
                 if target is None:continue
-                labels[comp]=target;changed+=1
+                local[comp]=target;changed+=1
         if not changed:break
     return labels
 def image_rgba(path):
@@ -78,6 +83,8 @@ def prepare(a):
         palette.append(c);entries.append({'index':i,'hex':color(c),'pixels':int(m.sum()),'rgb':c.tolist()})
     palette=np.array(palette)
     if prof and prof['label_min_area']>0:labels=despeckle_labels(labels,visible,prof['label_min_area'],palette)
+    counts=np.bincount(labels[visible],minlength=k)
+    for entry in entries:entry['pixels']=int(counts[entry['index']])
     reconstructed=np.dstack([palette[labels],alpha])
     Image.fromarray(reconstructed).save(work/'quantized-preview.png')
     np.savez_compressed(work/'prepared.npz',labels=labels,palette=palette,alpha=alpha)
@@ -106,102 +113,115 @@ def remap_plan_indices(plan,source,target):
                 if keep:roles[role]=keep
             obj['roles']=roles
     fix(plan)
+    if 'default' in plan:fix(plan['default'])
     for r in plan.get('regions',[]):fix(r)
     for r in plan.get('assignments',[]):fix(r)
     return plan
 
 def palette_merge(a):
+    """Validate and stage the complete merge before replacing any state files."""
     work=Path(a.work)
-    data=np.load(work/'prepared.npz',allow_pickle=False)
-    labels,palette,alpha=data['labels'],data['palette'],data['alpha']
+    with np.load(work/'prepared.npz',allow_pickle=False) as data:
+        labels,palette,alpha=data['labels'],data['palette'],data['alpha']
     k=len(palette)
     if not 0<=a.source<k or not 0<=a.target<k:raise ValueError(f'Palette index out of range 0..{k-1}')
     if a.source==a.target:raise ValueError('--from and --into must differ')
     info=json.loads((work/'palette.json').read_text(encoding='utf-8'))
+    old_fingerprint=palette_id(palette)
+    if info['fingerprint']!=old_fingerprint:raise ValueError('Palette metadata does not match prepared data')
     entries={e['index']:e for e in info['colors']}
-    source=entries.get(a.source)
-    if source is None or source.get('merged_into') is not None or int(source.get('pixels',0))==0:
-        raise ValueError(f'Palette slot {a.source} is a tombstone or missing; merge live colors only')
-    counts={e['index']:int(e.get('pixels',0)) for e in info['colors']}
-    total=counts[a.target]+counts[a.source]
-    if total==0:raise ValueError('Both palette slots are empty')
-    old_fingerprint=info['fingerprint']
-    # Mean over the union mask equals the pixel-count-weighted mean of the two entries,
-    # so no source-image re-read is needed and the result matches prepare's rounding.
-    merged=np.rint((palette[a.target].astype(float)*counts[a.target]+palette[a.source].astype(float)*counts[a.source])/total).astype(np.uint8)
-    labels=labels.copy();labels[labels==a.source]=a.target
-    palette=palette.copy();palette[a.target]=merged
-    np.savez_compressed(work/'prepared.npz',labels=labels,palette=palette,alpha=alpha)
-    Image.fromarray(np.dstack([palette[labels],alpha])).save(work/'quantized-preview.png')
-    new_fingerprint=palette_id(palette)
-    info['fingerprint']=new_fingerprint
-    for e in info['colors']:
-        if e['index']==a.target:
-            e['hex']=color(merged);e['rgb']=merged.tolist();e['pixels']=total
-        elif e['index']==a.source:
-            # Tombstone keeps the slot so indices above it never shift.
-            e['pixels']=0;e['merged_into']=a.target
-    save_json(work/'palette.json',info)
+    if set(entries)!=set(range(k)) or len(info['colors'])!=k:raise ValueError('Invalid palette slots')
+    counts=np.bincount(labels[alpha>0],minlength=k)
+    for index in (a.source,a.target):
+        if entries[index].get('merged_into') is not None or counts[index]==0:
+            raise ValueError(f'Palette slot {index} is a tombstone or empty; merge live colors only')
     report_path=work/'prepare-report.json'
     report=json.loads(report_path.read_text(encoding='utf-8')) if report_path.exists() else {}
-    report.setdefault('merges',[]).append({'from':a.source,'into':a.target,'merged_hex':color(merged),'previous_fingerprint':old_fingerprint,'toolkit_version':VERSION})
-    report['palette_fingerprint']=new_fingerprint
-    if 'quantization_rgb_mae' in report:report['quantization_rgb_mae']=None
-    save_json(report_path,report)
-    plan_remapped=None
+    plan=None;out_path=None
     if a.plan:
         plan_path=Path(a.plan)
         plan=json.loads(plan_path.read_text(encoding='utf-8-sig'))
-        if plan.get('palette_fingerprint') and plan['palette_fingerprint']!=old_fingerprint:
-            print('warning: plan palette_fingerprint does not match the pre-merge palette; remapping anyway',file=sys.stderr)
+        # Check source, indices, geometry and fingerprint against the old state.
+        load_prepared(work,plan)
+        out_path=Path(a.plan_out) if a.plan_out else plan_path
+        reserved={work/name for name in ('prepared.npz','palette.json','prepare-report.json','quantized-preview.png')}
+        if out_path.resolve() in {path.resolve() for path in reserved}:
+            raise ValueError('Plan output must not overwrite prepared state')
+    elif getattr(a,'plan_out',None):raise ValueError('--plan-out requires --plan')
+    total=int(counts[a.target]+counts[a.source])
+    merged=np.rint((palette[a.target].astype(float)*counts[a.target]+palette[a.source].astype(float)*counts[a.source])/total).astype(np.uint8)
+    labels=labels.copy();labels[labels==a.source]=a.target
+    palette=palette.copy();palette[a.target]=merged
+    new_fingerprint=palette_id(palette)
+    info['fingerprint']=new_fingerprint
+    for e in info['colors']:
+        e['pixels']=int(counts[e['index']])
+        if e['index']==a.target:
+            e['hex']=color(merged);e['rgb']=merged.tolist();e['pixels']=total
+        elif e['index']==a.source:
+            e['pixels']=0;e['merged_into']=a.target
+    event={'from':a.source,'into':a.target,'merged_hex':color(merged),'previous_fingerprint':old_fingerprint,'toolkit_version':VERSION}
+    report.setdefault('merges',[]).append(event)
+    report['palette_fingerprint']=new_fingerprint
+    if 'quantization_rgb_mae' in report:report['quantization_rgb_mae']=None
+    plan_remapped=None
+    json_bytes=lambda value:json.dumps(value,ensure_ascii=False,indent=2).encode('utf-8')
+    files={}
+    if plan is not None:
         remap_plan_indices(plan,a.source,a.target)
         plan['palette_fingerprint']=new_fingerprint
-        out_path=Path(a.plan_out) if a.plan_out else plan_path
-        out_path.parent.mkdir(parents=True,exist_ok=True)
-        out_path.write_text(json.dumps(plan,ensure_ascii=False,indent=2),encoding='utf-8')
-        plan_remapped=str(out_path.resolve())
-        report.setdefault('merges',[])[-1]['plan_remapped']=plan_remapped
-        save_json(report_path,report)
+        plan_remapped=str(out_path.resolve());event['plan_remapped']=plan_remapped
+        files[out_path]=json_bytes(plan)
+    prepared=io.BytesIO();np.savez_compressed(prepared,labels=labels,palette=palette,alpha=alpha)
+    preview=io.BytesIO();Image.fromarray(np.dstack([palette[labels],alpha])).save(preview,format='PNG')
+    files.update({work/'prepared.npz':prepared.getvalue(),work/'quantized-preview.png':preview.getvalue(),work/'palette.json':json_bytes(info),report_path:json_bytes(report)})
+    replace_files(files)
     print(json.dumps({'work':str(work.resolve()),'from':a.source,'into':a.target,'hex':color(merged),'pixels':total,'fingerprint':new_fingerprint,'plan_remapped':plan_remapped},ensure_ascii=False))
 
+
 def draft_plan(a):
-    """Propose a plan skeleton: one region per live palette color, with simplified
-    outer polygons from its connected components. Rename regions and set roles."""
+    """Draft exact palette masks; optional polygons support manual reshaping."""
     work=Path(a.work)
-    data=np.load(work/'prepared.npz',allow_pickle=False)
-    labels,palette,alpha=data['labels'],data['palette'],data['alpha']
+    with np.load(work/'prepared.npz',allow_pickle=False) as data:
+        labels,palette,alpha=data['labels'],data['palette'],data['alpha']
     h,w=labels.shape;visible=alpha>0
-    fingerprint=palette_id(palette)
-    info_path=work/'palette.json'
-    if info_path.exists():
-        info=json.loads(info_path.read_text(encoding='utf-8'))
-        fingerprint=info.get('fingerprint',fingerprint)
-        dead={e['index'] for e in info.get('colors',[]) if int(e.get('pixels',0))==0}
-    else:dead=set()
+    geometry=getattr(a,'geometry','masks')
+    single=getattr(a,'single_region',False)
+    counts=np.bincount(labels[visible],minlength=len(palette))
     regions=[];skipped=0
-    for ci in range(len(palette)):
-        if ci in dead:continue
-        m=np.uint8((labels==ci)&visible)
-        if not m.any():continue
-        count,cc,stats,_=cv2.connectedComponentsWithStats(m,8)
-        polys=[]
-        for k in range(1,count):
-            if stats[k,cv2.CC_STAT_AREA]<a.min_area:continue
-            cs,_=cv2.findContours(np.uint8(cc==k),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
-            for c in cs:
-                if len(c)<3:continue
-                p=cv2.approxPolyDP(c,a.epsilon,True).reshape(-1,2)
-                if len(p)>=3:polys.append([[int(x),int(y)] for x,y in p])
-        if not polys:skipped+=1;continue
-        hexc=color(palette[ci])
+    for ci in ([] if single else np.flatnonzero(counts)):
+        ci=int(ci);hexc=color(palette[ci])
         phase='ink' if a.ink_threshold>0 and int(max(palette[ci]))<a.ink_threshold else 'color'
-        regions.append({'id':f'palette-{ci}','name':f'Palette {ci} {hexc}','include_colors':[ci],'base':hexc,'phase':phase,'polygons':polys,'draft':{'pixels':int(m.sum()),'components':count-1,'polygons':len(polys)}})
+        region={'id':f'palette-{ci}','name':f'Palette {ci} {hexc}','include_colors':[ci],'base':hexc,'phase':phase,'draft':{'pixels':int(counts[ci])}}
+        if geometry=='masks':
+            region['selector']='colors'
+        else:
+            m=np.uint8((labels==ci)&visible)
+            count,cc,stats,_=cv2.connectedComponentsWithStats(m,8)
+            polys=[]
+            for k in range(1,count):
+                if stats[k,cv2.CC_STAT_AREA]<a.min_area:continue
+                x,y,bw,bh,_=map(int,stats[k])
+                cs,_=cv2.findContours(np.uint8(cc[y:y+bh,x:x+bw]==k),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE,offset=(x,y))
+                for c in cs:
+                    if len(c)<3:continue
+                    poly=cv2.approxPolyDP(c,a.epsilon,True).reshape(-1,2)
+                    if len(poly)>=3:polys.append(poly.tolist())
+            if not polys:skipped+=1;continue
+            region['polygons']=polys
+        regions.append(region)
     regions.sort(key=lambda r:-r['draft']['pixels'])
     if a.max_regions>0:regions=regions[:a.max_regions]
-    dominant=color(palette[int(np.bincount(labels[visible],minlength=len(palette)).argmax())])
-    plan={'title':'Auto draft plan','coordinate_size':[w,h],'palette_fingerprint':fingerprint,'default':{'id':'unassigned','name':'Unassigned','base':dominant,'phase':'background'},'roles':{},'regions':regions,'draft_meta':{'generated_by':'img2svg draft-plan','toolkit_version':VERSION,'min_area':a.min_area,'epsilon':a.epsilon,'regions':len(regions),'skipped_colors':skipped,'note':'Auto-proposed polygons from connected components. Rename regions, assign roles/ink, and split or merge as needed before tracing.'}}
-    out=Path(a.output);out.parent.mkdir(parents=True,exist_ok=True);out.write_text(json.dumps(plan,ensure_ascii=False,indent=2),encoding='utf-8')
-    print(json.dumps({'draft_plan':str(out.resolve()),'regions':len(regions),'polygons':sum(len(r['polygons']) for r in regions),'skipped_colors':skipped,'width':w,'height':h},ensure_ascii=False))
+    dominant=color(palette[int(counts.argmax())])
+    default={'id':'art' if single else 'unassigned','name':'Artwork' if single else 'Unassigned','base':dominant,'phase':'color'}
+    plan={'title':'Auto draft plan','coordinate_size':[w,h],'palette_fingerprint':palette_id(palette),'default':default,'roles':{},'regions':regions,'draft_meta':{'generated_by':'img2svg draft-plan','toolkit_version':VERSION,'geometry':geometry,'single_region':single,'regions':len(regions),'skipped_colors':skipped,'note':'Palette masks are not semantic objects. Inspect the reference and group/split them, assign roles and protect important detail before optimization.'}}
+    report_path=work/'prepare-report.json'
+    if report_path.exists():
+        source=json.loads(report_path.read_text(encoding='utf-8')).get('source_sha256')
+        if source:plan['source_sha256']=source
+    out=Path(a.output);out.parent.mkdir(parents=True,exist_ok=True);save_json(out,plan)
+    print(json.dumps({'draft_plan':str(out.resolve()),'regions':len(regions),'polygons':sum(len(r.get('polygons',[])) for r in regions),'skipped_colors':skipped,'width':w,'height':h},ensure_ascii=False))
+
 
 def plan_regions(plan,labels):
     h,w=labels.shape;cw,ch=plan.get('coordinate_size',[w,h])
@@ -221,8 +241,11 @@ def plan_regions(plan,labels):
         if len(assigned)!=len(set(assigned)):raise ValueError('Duplicate color roles in '+rid)
     def apply_region(i,r):
         rid=regions[i]['id']
-        polys=r.get('polygons',[r.get('polygon',[])])
-        mask=np.zeros((h,w),np.uint8)
+        selector=r.get('selector')
+        if selector is not None and (selector!='colors' or not r.get('include_colors') or 'polygon' in r or 'polygons' in r):
+            raise ValueError('colors selector requires include_colors and no polygon: '+rid)
+        polys=[] if selector=='colors' else r.get('polygons',[r.get('polygon',[])])
+        mask=np.ones((h,w),np.uint8) if selector=='colors' else np.zeros((h,w),np.uint8)
         for poly in polys:
             pts=np.asarray(poly,float)
             if pts.ndim!=2 or pts.shape[0]<3 or pts.shape[1]!=2 or not np.isfinite(pts).all():raise ValueError('Polygon needs at least 3 finite x,y pairs: '+rid)
@@ -236,7 +259,7 @@ def plan_regions(plan,labels):
             take&=np.isin(mapping,[lookup[v] for v in r['only_from']])
         mapping[take]=i
     for i,r in enumerate(regions[1:],1):
-        if 'polygon' in r or 'polygons' in r:apply_region(i,r)
+        if 'polygon' in r or 'polygons' in r or 'selector' in r:apply_region(i,r)
     lookup={r['id']:i for i,r in enumerate(regions)}
     for assignment in plan.get('assignments',[]):
         if assignment.get('region') not in lookup:raise ValueError('Unknown assignment region')
@@ -244,13 +267,21 @@ def plan_regions(plan,labels):
     return regions,mapping
 
 def load_prepared(work,plan):
-    data=np.load(Path(work)/'prepared.npz',allow_pickle=False)
-    labels,palette,alpha=data['labels'],data['palette'],data['alpha']
+    with np.load(Path(work)/'prepared.npz',allow_pickle=False) as data:
+        labels,palette,alpha=data['labels'],data['palette'],data['alpha']
+    fingerprint=palette_id(palette)
+    metadata=Path(work)/'palette.json'
+    if metadata.exists():
+        info=json.loads(metadata.read_text(encoding='utf-8'))
+        if info.get('fingerprint')!=fingerprint:
+            raise ValueError('Palette metadata does not match prepared data')
+        if not plan.get('palette_fingerprint'):
+            raise ValueError('Plan palette_fingerprint is required for prepared palette data')
     prepared_report=Path(work)/'prepare-report.json'
     if plan.get('source_sha256'):
         report=json.loads(prepared_report.read_text(encoding='utf-8')) if prepared_report.exists() else {}
         if report.get('source_sha256')!=plan['source_sha256']:raise ValueError('Plan source_sha256 belongs to a different source image')
-    if plan.get('palette_fingerprint') and plan['palette_fingerprint']!=palette_id(palette):
+    if plan.get('palette_fingerprint') and plan['palette_fingerprint']!=fingerprint:
         raise ValueError('Palette changed: inspect new palette and rebuild role/filter indices')
     regions,mapping=plan_regions(plan,labels)
     for r in [plan]+regions+plan.get('assignments',[]):
@@ -269,54 +300,88 @@ def role_for(region,ci,global_roles):
         if ci in ids:return role
     return region.get('phase','color')
 
-def collapse_palette(labels,palette,plan,distance):
-    """Merge same-role palette colours within `distance` RGB into one mask, so the
-    merged shade geometry becomes one path instead of one per band. Returns the
-    relabelled map, a {representative_index: hex} paint override, and how many
-    palette indices were folded away."""
-    if distance<=0:return labels,{},0
-    k=len(palette);role_of=['color']*k
-    for role,ids in plan.get('roles',{}).items():
-        for i in ids:
-            if 0<=i<k:role_of[i]=role
-    parent=list(range(k))
-    def find(x):
-        while parent[x]!=x:parent[x]=parent[parent[x]];x=parent[x]
-        return x
-    for i in range(k):
-        for j in range(i+1,k):
-            if role_of[i]==role_of[j] and float(np.linalg.norm(palette[i].astype(float)-palette[j].astype(float)))<=distance:
-                ri,rj=find(i),find(j)
-                if ri!=rj:parent[rj]=ri
-    counts=np.bincount(labels.ravel(),minlength=k).astype(float)
-    groups={}
-    for i in range(k):groups.setdefault(find(i),[]).append(i)
-    paint={};remap={}
-    for members in groups.values():
-        if len(members)<2:continue
-        rep=max(members,key=lambda ci:counts[ci])
-        total=sum(counts[ci] for ci in members) or 1
-        mean=np.rint(sum(palette[ci].astype(float)*counts[ci] for ci in members)/total).astype(np.uint8)
-        for ci in members:remap[ci]=rep
-        paint[rep]=color(mean)
-    if not remap:return labels,{},0
-    out=labels.copy()
-    for ci,rep in remap.items():out[labels==ci]=rep
-    return out,paint,len(remap)
+def collapse_palette(labels,palette,plan,distance,alpha,regions,mapping,max_diameter=None):
+    """Merge visible colours only within the same region and resolved role.
+
+    Paint overrides are keyed by (region, representative), since the same
+    palette index can have different meanings and mixtures in different regions.
+    """
+    out=labels.copy();paint={};merged_count=0;k=len(palette)
+    for ri,region in enumerate(regions):
+        threshold=region.get('trace',{}).get('merge_colors',distance)
+        if isinstance(threshold,bool) or not isinstance(threshold,(int,float)) or not 0<=threshold<=60:
+            raise ValueError('Regional merge_colors must be within 0..60')
+        if max_diameter is not None:threshold=min(threshold,max_diameter)
+        if threshold==0:continue
+        owned=(mapping==ri)&(alpha>0)
+        counts=np.bincount(labels[owned],minlength=k)
+        live=np.flatnonzero(counts).tolist()
+        roles={ci:role_for(region,ci,plan.get('roles',{})) for ci in live}
+        # Complete-link groups bound the entire colour diameter: a chain of
+        # individually close shades must not collapse unrelated endpoints.
+        groups=[]
+        rgb=palette.astype(float)
+        for ci in sorted(live,key=lambda index:(-counts[index],index)):
+            choices=[]
+            for index,members in enumerate(groups):
+                if roles[ci]!=roles[members[0]]:continue
+                if np.max(np.linalg.norm(rgb[members]-rgb[ci],axis=1))>threshold:continue
+                mean=np.average(rgb[members],axis=0,weights=counts[members])
+                choices.append((float(np.linalg.norm(rgb[ci]-mean)),index))
+            if choices:groups[min(choices)[1]].append(ci)
+            else:groups.append([ci])
+        lookup=np.arange(k,dtype=labels.dtype)
+        for members in groups:
+            if len(members)<2:continue
+            rep=max(members,key=lambda ci:counts[ci])
+            mean=np.rint(np.average(palette[members].astype(float),axis=0,weights=counts[members])).astype(np.uint8)
+            lookup[members]=rep;paint[ri,rep]=color(mean)
+            merged_count+=len(members)-1
+        out[owned]=lookup[labels[owned]]
+    return out,paint,merged_count
+
+
+def auto_tone_source(work,plan,shape):
+    """Only trusted, single-region auto plans may sample their original image."""
+    if not plan.get('draft_meta',{}).get('single_region'):return None,'semantic plan'
+    report=Path(work)/'prepare-report.json'
+    if not report.exists():return None,'prepare report unavailable'
+    info=json.loads(report.read_text(encoding='utf-8'))
+    path=Path(info.get('source',''))
+    if not path.is_file():return None,'original source unavailable'
+    digest=hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest!=info.get('source_sha256') or (plan.get('source_sha256') and digest!=plan['source_sha256']):
+        return None,'original source hash mismatch'
+    rgba=image_rgba(path)
+    if rgba.shape[:2]!=shape:return None,'original source dimensions differ'
+    return rgba[:,:,:3],'verified original source'
+
 
 def path_data(points):
-    p=np.asarray(points).reshape(-1,2).astype(float)/2+.25
-    n=lambda v:format(v,'g')
-    text=[f'M{n(p[0,0])} {n(p[0,1])}'];prev=p[0]
-    for v in p[1:]:
-        dx,dy=v-prev
-        if dx==0:s='v'+n(dy)
-        elif dy==0:s='h'+n(dx)
-        else:
-            absolute='L'+n(v[0])+' '+n(v[1]);relative='l'+n(dx)+' '+n(dy)
-            s=relative if len(relative)<len(absolute) else absolute
-        text.append(s);prev=v
-    return ''.join(text)+'Z'
+    """Short SVG commands with exact quarter-pixel coordinates (no rounding)."""
+    points=np.asarray(points).reshape(-1,2).astype(float)/2+.25
+    def number(value):
+        text=format(value,'.2f').rstrip('0').rstrip('.')
+        if text.startswith('0.'):return text[1:]
+        if text.startswith('-0.'):return '-'+text[2:]
+        return text
+    def pair(x,y):
+        a,b=number(x),number(y)
+        return a+('' if b.startswith('-') else ' ')+b
+    parts=['M'+pair(*points[0])];previous=points[0];last='M'
+    for point in points[1:]:
+        dx,dy=point-previous
+        if dx==0:choices=[('v',number(dy)),('V',number(point[1]))]
+        elif dy==0:choices=[('h',number(dx)),('H',number(point[0]))]
+        else:choices=[('l',pair(dx,dy)),('L',pair(*point))]
+        candidates=[]
+        for command,args in choices:
+            prefix=('' if args.startswith('-') else ' ') if command==last else command
+            candidates.append((prefix+args,command))
+        segment,last=min(candidates,key=lambda item:len(item[0]))
+        parts.append(segment);previous=point
+    return ''.join(parts)+'Z'
+
 
 def contours_to_path(mask,epsilon):
     x,y,w,h=cv2.boundingRect(cv2.findNonZero(mask))
@@ -342,127 +407,118 @@ def contours_to_path(mask,epsilon):
     pieces.sort(reverse=True)
     return ' '.join(d for _,d in pieces),vertices,count
 
-def skeletonize(binary):
-    a=np.pad(binary.astype(np.uint8),1)
-    for _ in range(100):
-        changed=0
-        for phase in (0,1):
-            p=a[1:-1,1:-1]
-            n=[a[:-2,1:-1],a[:-2,2:],a[1:-1,2:],a[2:,2:],a[2:,1:-1],a[2:,:-2],a[1:-1,:-2],a[:-2,:-2]]
-            total=sum(n);trans=sum((n[i]==0)&(n[(i+1)%8]==1) for i in range(8))
-            common=(p==1)&(total>=2)&(total<=6)&(trans==1)
-            drop=common&(n[0]*n[2]*n[4]==0)&(n[2]*n[4]*n[6]==0) if phase==0 else common&(n[0]*n[2]*n[6]==0)&(n[0]*n[4]*n[6]==0)
-            changed+=int(drop.sum());p[drop]=0
-        if not changed:break
-    return a[1:-1,1:-1]
 
-def line_art(mask,mapping,regions,w,h,path):
-    distance=cv2.distanceTransform(mask.astype(np.uint8),cv2.DIST_L2,3)
-    sk=skeletonize(mask);sk[distance>4]=0
-    nodes={int(y)*w+int(x) for y,x in np.argwhere(sk)}
-    neighbors={p:[p+dy*w+dx for dy,dx in [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)] if 0<=p%w+dx<w and p+dy*w+dx in nodes] for p in nodes}
-    visited=set();lines=[]
-    for start in sorted(nodes,key=lambda p:(len(neighbors[p])==2,p)):
-        for nxt in neighbors[start]:
-            edge=tuple(sorted((start,nxt)))
-            if edge in visited:continue
-            seq=[start];prev=start;cur=nxt;visited.add(edge)
-            while True:
-                seq.append(cur)
-                options=[v for v in neighbors[cur] if v!=prev and tuple(sorted((cur,v))) not in visited]
-                if len(neighbors[cur])!=2 or not options:break
-                v=options[0];visited.add(tuple(sorted((cur,v))));prev,cur=cur,v
-            if len(seq)<4:continue
-            xy=np.array([[p%w+.5,p//w+.5] for p in seq],np.float32)
-            length=float(np.linalg.norm(np.diff(xy,axis=0),axis=1).sum())
-            if length<4:continue
-            p=cv2.approxPolyDP(xy,.45,False).reshape(-1,2)
-            owner=int(mapping[seq[len(seq)//2]//w,seq[len(seq)//2]%w])
-            d='M'+' '.join(f'{v:g}' for v in p[0])+'L'+' '.join(f'{v:g}' for v in p[1:].ravel())
-            width=np.clip(np.median([distance[p//w,p%w] for p in seq])*1.8,.8,3.2)
-            lines.append((regions[owner].get('ink_order',owner),int(xy[:,1].min()),d,length,width))
-    lines.sort(key=lambda v:(v[0],v[1]));total=sum(v[3] for v in lines) or 1;offset=0
-    root=node('svg',{'viewBox':f'0 0 {w} {h}','width':w,'height':h,'version':'1.1'})
-    for i,(_,__,d,length,width) in enumerate(lines):
-        root.append(node('path',{'id':f'pencil-{i}','d':d,'fill':'none','stroke':'#71666a','stroke-width':f'{width:.2f}','stroke-linecap':'round','stroke-linejoin':'round','data-start':f'{offset/total:.6f}','data-span':f'{length/total:.6f}'}));offset+=length
-    write_svg(root,path);return len(lines)
 
 def trace(a):
     plan=json.loads(Path(a.plan).read_text(encoding='utf-8-sig'))
     labels,palette,alpha,regions,mapping=load_prepared(a.work,plan);h,w=labels.shape
-    labels,paint_override,merged_count=collapse_palette(labels,palette,plan,a.merge_colors)
     from region_cleanup import clean_regions
     labels,cleanup=clean_regions(labels,palette,alpha,mapping,regions,plan.get('roles',{}))
+    auto_plan=bool(plan.get('draft_meta',{}).get('single_region'))
+    protect=auto_plan and not getattr(a,'no_weak_tones',False)
+    # Guard against merging pigments sampled from unrelated locations. The
+    # merged group may otherwise darken a faint patch and lighten its surround.
+    max_diameter=(12-.04*quality_profile(getattr(a,'fidelity',None))['fidelity']) if protect else None
+    labels,paint_override,merged_count=collapse_palette(labels,palette,plan,a.merge_colors,alpha,regions,mapping,max_diameter=max_diameter)
+    source_rgb,source_status=auto_tone_source(a.work,plan,(h,w)) if protect else (None,'disabled')
+    from weak_tones import separate_weak_tones,gradient_for_component,vector_gradient_rings
+    tone_count=tone_pixels=gradient_count=0
     root=node('svg',{'id':'illustration','version':'1.1','width':w,'height':h,'viewBox':f'0 0 {w} {h}','preserveAspectRatio':'xMidYMid meet'})
     title=node('title');title.text=plan.get('title','Reference reconstruction');root.append(title)
+    if np.all(alpha==255):
+        # An opaque raster has no transparent cracks, including at fitted edges.
+        background=int(np.bincount(labels.ravel(),minlength=len(palette)).argmax())
+        root.append(node('rect',{'id':'drawing-paper','width':w,'height':h,'fill':color(palette[background]),'stroke':'none'}))
     artwork=node('g',{'id':'artwork'});root.append(artwork)
-    vertex_count=contour_count=path_count=0;ink_mask=np.zeros((h,w),bool);coverage=[]
+    vertex_count=contour_count=path_count=0;coverage=[]
     packed=labels.astype(np.uint32)*256+alpha.astype(np.uint32)
     for ri,r in enumerate(regions):
-        group=node('g',{'id':r['id'],'data-region':r['id'],'data-name':r.get('name',r['id']),'data-base':r['base'],'data-order':ri/max(1,len(regions)-1)})
+        group=node('g',{'id':r['id'],'data-region':r['id'],'data-name':r.get('name',r['id']),'data-base':r['base']})
         covered=(mapping==ri)&(alpha>0);coverage.append({'id':r['id'],'pixels':int(covered.sum())})
         if not covered.any():continue
         pigment={tone:[] for tone in TONES}
         for code in np.unique(packed[covered]):
             ci=int(code)//256;opacity=int(code)%256
             role=role_for(r,ci,plan.get('roles',{}));m=(mapping==ri)&(packed==code)
-            if role=='ink':ink_mask|=m
             settings=r.get('trace',{});epsilon=settings.get('epsilon',a.epsilon)
             if 'dark_epsilon' in settings and max(palette[ci])<settings.get('dark_threshold',176):epsilon=settings['dark_epsilon']
             overlap=settings.get('overlap',a.overlap)
             if not 0<=epsilon<=2 or not 0<=overlap<=3:raise ValueError('Invalid regional trace settings')
-            d,vertices,contours=contours_to_path(np.uint8(m)*255,min(epsilon,.2) if opacity<255 else epsilon)
-            if not d:continue
             width=.55 if role=='ink' or opacity<255 else overlap
-            paint=paint_override.get(ci,color(palette[ci]))
-            attrs={'id':f'{r["id"]}-{role}-c{ci}-a{opacity}','fill':paint,'stroke':paint,'stroke-width':f'{width:g}','stroke-linejoin':'round','stroke-linecap':'round','fill-rule':'evenodd','d':d}
-            if opacity<255:attrs['opacity']=f'{opacity/255:.6f}'
-            pigment[role].append((float(palette[ci].mean()),node('path',attrs)))
-            vertex_count+=vertices;contour_count+=contours;path_count+=1
+            paint=paint_override.get((ri,ci),color(palette[ci]))
+            masks=[(np.uint8(m)*255,paint,None)]
+            if source_rgb is not None and role=='color' and opacity==255:
+                original=np.array([int(paint[i:i+2],16) for i in (1,3,5)],np.uint8)
+                remaining,parts,affected=separate_weak_tones(masks[0][0],source_rgb,original,max_area=max(160,int(h*w*.04)))
+                masks=[(remaining,paint,None)]
+                for component,rgb in parts:
+                    gradient=(gradient_for_component(component,source_rgb,rgb)
+                              if getattr(a,'soft_tones_mode','gradient')=='gradient' else None)
+                    masks.append((component,color(rgb),gradient))
+                tone_count+=len(parts);tone_pixels+=affected
+            for number,(part_mask,part_paint,gradient) in enumerate(masks):
+                if not part_mask.any():continue
+                suffix=f'-tone{number}' if number else ''
+                if gradient is not None:
+                    group_id=f'{r["id"]}-{role}-c{ci}-a{opacity}{suffix}'
+                    bands=node('g',{'id':group_id,'data-soft-tone':'vector-gradient'})
+                    budget=int(round(10+10*quality_profile(getattr(a,'fidelity',None))['fidelity']/100))
+                    for bi,(local,stop_rgb,x0,y0) in enumerate(vector_gradient_rings(part_mask,gradient,budget)):
+                        d,v,c=contours_to_path(local,epsilon)
+                        if not d:continue
+                        bands.append(node('path',{'id':f'{group_id}-band{bi}','d':d,
+                            'transform':f'translate({x0} {y0})',
+                            'fill':color(stop_rgb),'stroke':'none','fill-rule':'evenodd'}))
+                        vertex_count+=v;contour_count+=c;path_count+=1
+                    if len(bands):
+                        pigment[role].append((float(palette[ci].mean()),bands))
+                        gradient_count+=1
+                    continue
+                d,vertices,contours=contours_to_path(part_mask,min(epsilon,.2) if opacity<255 else epsilon)
+                if not d:continue
+                attrs={'id':f'{r["id"]}-{role}-c{ci}-a{opacity}{suffix}','fill':part_paint,'stroke':part_paint,'stroke-width':f'{width:g}','stroke-linejoin':'round','stroke-linecap':'round','fill-rule':'evenodd','d':d}
+                if opacity<255:attrs['opacity']=f'{opacity/255:.6f}'
+                pigment[role].append((float(palette[ci].mean()),node('path',attrs)))
+                vertex_count+=vertices;contour_count+=contours;path_count+=1
         for tone in TONES:
             if not pigment[tone]:continue
-            layer=node('g',{'id':f'{r["id"]}-{tone}','data-tone':tone,'data-order':ri/max(1,len(regions)-1)})
+            layer=node('g',{'id':f'{r["id"]}-{tone}','data-tone':tone})
             for _,paint in sorted(pigment[tone],key=lambda v:-v[0]):layer.append(paint)
             group.append(layer)
         artwork.append(group)
-    validate(root);write_svg(root,a.output)
-    if a.line_art:
-        if a.pencil_mode=='legacy':strokes=line_art(ink_mask,mapping,regions,w,h,a.line_art)
-        else:
-            from stroke_replay import make_lines
-            strokes=make_lines(ink_mask,mapping,regions,w,h,a.line_art,plan.get('replay',{}))
-    else:strokes=None
-    report={'width':w,'height':h,'native_paths':path_count,'connected_contours':contour_count,'vertices':vertex_count,'pencil_strokes':strokes,'pencil_mode':a.pencil_mode,'svg_bytes':Path(a.output).stat().st_size,'region_coverage':coverage,'cleanup':cleanup,'palette_fingerprint':palette_id(palette),'plan_sha256':hashlib.sha256(Path(a.plan).read_bytes()).hexdigest(),'epsilon':a.epsilon,'overlap':a.overlap,'toolkit_version':VERSION,'fidelity':getattr(a,'fidelity',None),'merge_colors':a.merge_colors,'merged_color_indices':merged_count,'limits':{'max_bytes':a.max_bytes,'max_paths':a.max_paths},'oversize':[],'note':'Appearance contours and reconstructed replay strokes are separate; visual QA is required.'}
+    validate(root)
+    svg_buffer=io.BytesIO()
+    ET.ElementTree(root).write(svg_buffer,encoding='utf-8',xml_declaration=True)
+    svg_bytes=svg_buffer.getvalue()
+    outputs={Path(a.output):svg_bytes}
+    report={'width':w,'height':h,'native_paths':path_count,'connected_contours':contour_count,'vertices':vertex_count,'svg_bytes':len(svg_bytes),'region_coverage':coverage,'cleanup':cleanup,'palette_fingerprint':palette_id(palette),'plan_sha256':hashlib.sha256(Path(a.plan).read_bytes()).hexdigest(),'epsilon':a.epsilon,'overlap':a.overlap,'toolkit_version':VERSION,'fidelity':getattr(a,'fidelity',None),'merge_colors':a.merge_colors,'merged_color_indices':merged_count,'weak_tones':{'enabled':protect,'source':source_status,'max_merge_diameter':max_diameter,'recolored_components':tone_count,'recolored_pixels':tone_pixels,'gradient_components':gradient_count},'limits':{'max_bytes':a.max_bytes,'max_paths':a.max_paths},'oversize':[],'note':'Visual quality assessment requires independent rendering and image inspection.'}
     if a.max_paths>0 and path_count>a.max_paths:report['oversize'].append({'kind':'paths','value':path_count,'limit':a.max_paths})
     if a.max_bytes>0 and report['svg_bytes']>a.max_bytes:report['oversize'].append({'kind':'bytes','value':report['svg_bytes'],'limit':a.max_bytes})
     for item in report['oversize']:
         print(f"oversize: {item['kind']} {item['value']} exceeds limit {item['limit']}; discuss the fidelity/size tradeoff before delivering",file=sys.stderr)
-    save_json(Path(a.work)/'trace-report.json',report);print(json.dumps(report,ensure_ascii=False))
+    outputs[Path(getattr(a,'report',None) or Path(a.work)/'trace-report.json')]=json.dumps(report,ensure_ascii=False,indent=2).encode('utf-8')
+    replace_files(outputs)
+    print(json.dumps(report,ensure_ascii=False))
 
 def auto(a):
-    """One-click, agent-free pipeline: prepare -> draft-plan -> trace (+demo).
+    """One-click, agent-free pipeline: prepare -> draft-plan -> trace.
     A single --fidelity value drives every stage's fidelity/size tradeoff."""
     prof=quality_profile(a.fidelity)
     out=Path(a.output);work=Path(a.work) if a.work else out/'work'
     prepare(argparse.Namespace(input=a.input,work=str(work),colors=None,denoise=12,seed=41,focus=[],sample_step=None,fidelity=a.fidelity))
-    draft_plan(argparse.Namespace(work=str(work),output=str(work/'plan.json'),min_area=max(4,prof['label_min_area']),epsilon=prof['epsilon'],max_regions=0,ink_threshold=0))
-    trace(argparse.Namespace(work=str(work),plan=str(work/'plan.json'),output=str(out/'illustration.svg'),line_art=str(work/'line-art.svg'),epsilon=prof['epsilon'],overlap=prof['overlap'],pencil_mode='connected',max_bytes=a.max_bytes,max_paths=a.max_paths,merge_colors=prof['merge_distance'],fidelity=a.fidelity))
-    demo=None
-    if getattr(a,'demo',False):
-        import subprocess
-        subprocess.run([sys.executable,str(Path(__file__).resolve().parent/'make_demo.py'),str(out/'illustration.svg'),'--line-art',str(work/'line-art.svg'),'--plan',str(work/'plan.json'),'--output',str(out/'index.html')],check=True)
-        demo=str((out/'index.html').resolve())
-    print(json.dumps({'auto':str(out.resolve()),'work':str(work.resolve()),'fidelity':prof['fidelity'],'colors':prof['colors'],'epsilon':prof['epsilon'],'merge_distance':prof['merge_distance'],'demo':demo},ensure_ascii=False))
+    draft_plan(argparse.Namespace(work=str(work),output=str(work/'plan.json'),min_area=max(4,prof['label_min_area']),epsilon=prof['epsilon'],max_regions=0,ink_threshold=0,geometry='masks',single_region=True))
+    trace(argparse.Namespace(work=str(work),plan=str(work/'plan.json'),output=str(out/'illustration.svg'),epsilon=prof['epsilon'],overlap=prof['overlap'],max_bytes=a.max_bytes,max_paths=a.max_paths,merge_colors=prof['merge_distance'],fidelity=prof['fidelity'],no_weak_tones=getattr(a,'no_weak_tones',False),soft_tones_mode=getattr(a,'soft_tones_mode','gradient')))
+    print(json.dumps({'auto':str(out.resolve()),'work':str(work.resolve()),'fidelity':prof['fidelity'],'colors':prof['colors'],'epsilon':prof['epsilon'],'merge_distance':prof['merge_distance']},ensure_ascii=False))
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--version',action='version',version='img2svg '+VERSION)
     sub=parser.add_subparsers(dest='command',required=True)
     p=sub.add_parser('prepare');p.add_argument('input');p.add_argument('--work',required=True);p.add_argument('--colors',type=int);p.add_argument('--denoise',type=float,default=12);p.add_argument('--seed',type=int,default=41);p.add_argument('--focus',action='append',default=[]);p.add_argument('--sample-step',type=int);p.add_argument('--fidelity')
-    p=sub.add_parser('trace');p.add_argument('--work',required=True);p.add_argument('--plan',required=True);p.add_argument('--output',required=True);p.add_argument('--line-art');p.add_argument('--epsilon',type=float);p.add_argument('--overlap',type=float);p.add_argument('--pencil-mode',choices=['connected','legacy'],default='connected');p.add_argument('--max-bytes',type=int,default=0);p.add_argument('--max-paths',type=int,default=0);p.add_argument('--merge-colors',type=int);p.add_argument('--fidelity')
+    p=sub.add_parser('trace');p.add_argument('--work',required=True);p.add_argument('--plan',required=True);p.add_argument('--output',required=True);p.add_argument('--epsilon',type=float);p.add_argument('--overlap',type=float);p.add_argument('--report');p.add_argument('--max-bytes',type=int,default=0);p.add_argument('--max-paths',type=int,default=0);p.add_argument('--merge-colors',type=int);p.add_argument('--fidelity');p.add_argument('--no-weak-tones',action='store_true',help='Disable conservative weak-tone preservation for agent-free plans');p.add_argument('--soft-tones-mode',choices=['gradient','recolor'],default='gradient')
     p=sub.add_parser('palette-merge');p.add_argument('work');p.add_argument('--from',dest='source',type=int,required=True);p.add_argument('--into',dest='target',type=int,required=True);p.add_argument('--plan');p.add_argument('--plan-out')
-    p=sub.add_parser('draft-plan');p.add_argument('--work',required=True);p.add_argument('--output',required=True);p.add_argument('--min-area',type=int,default=12);p.add_argument('--epsilon',type=float,default=1.5);p.add_argument('--max-regions',type=int,default=0);p.add_argument('--ink-threshold',type=int,default=0)
-    p=sub.add_parser('auto');p.add_argument('input');p.add_argument('--output',required=True);p.add_argument('--work');p.add_argument('--fidelity',default='balanced');p.add_argument('--demo',action='store_true');p.add_argument('--max-bytes',type=int,default=0);p.add_argument('--max-paths',type=int,default=0)
+    p=sub.add_parser('draft-plan');p.add_argument('--work',required=True);p.add_argument('--output',required=True);p.add_argument('--min-area',type=int,default=12);p.add_argument('--epsilon',type=float,default=1.5);p.add_argument('--max-regions',type=int,default=0);p.add_argument('--ink-threshold',type=int,default=0);p.add_argument('--geometry',choices=['masks','polygons'],default='masks')
+    p=sub.add_parser('auto');p.add_argument('input');p.add_argument('--output',required=True);p.add_argument('--work');p.add_argument('--fidelity',default='balanced');p.add_argument('--max-bytes',type=int,default=0);p.add_argument('--max-paths',type=int,default=0);p.add_argument('--no-weak-tones',action='store_true',help='Disable source-aware weak-tone preservation');p.add_argument('--soft-tones-mode',choices=['gradient','recolor'],default='gradient')
     a=parser.parse_args()
     if a.command=='prepare':
         if a.colors is not None and not 1<=a.colors<=256:parser.error('colors 1..256')

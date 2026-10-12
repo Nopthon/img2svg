@@ -24,13 +24,14 @@ def main():
     draw.line((16,81,100,81),fill='#34383c',width=1)
     source=work/'reference.png';im.save(source)
     run(scripts/'vectorize.py','prepare',source,'--work',work/'analysis','--colors',6,'--denoise',0)
-    palette=json.loads((work/'analysis/palette.json').read_text(encoding='utf-8'))['colors']
+    info=json.loads((work/'analysis/palette.json').read_text(encoding='utf-8'))
+    palette=info['colors']
     nearest=lambda target:min(palette,key=lambda e:sum((a-b)**2 for a,b in zip(e['rgb'],target)))['index']
     ink=nearest((52,56,60));green=nearest((56,171,115));rose=nearest((195,73,122))
-    plan={'coordinate_size':[128,96],'default':{'id':'paper','base':'#fff7e5','phase':'background'},'roles':{'ink':[ink]},'regions':[{'id':'green-ring','base':'#38ab73','polygon':[[0,0],[128,0],[128,96],[0,96]],'include_colors':[green,ink],'roles':{'ink':[ink]}},{'id':'rose-window','base':'#c3497a','polygon':[[85,20],[116,20],[116,64],[85,64]],'include_colors':[rose],'phase':'shadow'}]}
+    plan={'palette_fingerprint':info['fingerprint'],'coordinate_size':[128,96],'default':{'id':'paper','base':'#fff7e5','phase':'background'},'roles':{'ink':[ink]},'regions':[{'id':'green-ring','base':'#38ab73','polygon':[[0,0],[128,0],[128,96],[0,96]],'include_colors':[green,ink],'roles':{'ink':[ink]}},{'id':'rose-window','base':'#c3497a','polygon':[[85,20],[116,20],[116,64],[85,64]],'include_colors':[rose],'phase':'shadow'}]}
     (work/'plan.json').write_text(json.dumps(plan),encoding='utf-8')
     result=work/'illustration.svg'
-    run(scripts/'vectorize.py','trace','--work',work/'analysis','--plan',work/'plan.json','--output',result,'--line-art',work/'lines.svg','--epsilon',.15,'--overlap',.65)
+    run(scripts/'vectorize.py','trace','--work',work/'analysis','--plan',work/'plan.json','--output',result,'--epsilon',.15,'--overlap',.65)
     validate(load_svg(result))
     doc=pymupdf.open(result);pix=doc[0].get_pixmap(alpha=True);pix.save(work/'render.png')
     rgba=np.asarray(Image.open(work/'render.png').convert('RGBA'))
@@ -40,11 +41,17 @@ def main():
     assert int(rgba[47,48,0])>240 and int(rgba[47,48,1])>225,'Contour hole filled'
     assert int(rgba[45,27,1])>int(rgba[45,27,0])+60,'Green paint missing'
     assert int((rgba[80:83,16:101,:3].min(axis=0).max(axis=1)<150).sum())>=70,'One-pixel line lost'
-    run(scripts/'make_demo.py',result,'--output',work/'index.html','--line-art',work/'lines.svg','--plan',work/'plan.json')
-    page=(work/'index.html').read_text(encoding='utf-8')
-    assert 'var(' not in page and '<image' not in page and '<canvas' not in page
-    assert '>Highlight</button>' not in page and '>Sketch</button>' not in page,'Empty stages retained'
-    assert '>Shadow</button>' in page and '>Line art</button>' in page,'Existing stages removed'
+    run(scripts/'render_check.py',result,'--png',work/'checked.png','--reference',source,'--quantized-preview',work/'analysis/quantized-preview.png','--report',work/'render-report.json')
+    report=json.loads((work/'render-report.json').read_text(encoding='utf-8'))
+    assert set(report['rendered_vs_prepared_rgb_bias'])=={'r','g','b'} and report['rendered_vs_prepared_rgb_mae']>=0
+    assert not (work/'lines.svg').exists() and not (work/'index.html').exists(), 'Trace unexpectedly generated a drawing replay'
+    def rejected(*command):
+        completed=subprocess.run([sys.executable,*map(str,command)],capture_output=True,text=True,encoding='utf-8',errors='replace')
+        assert completed.returncode!=0 and 'unrecognized arguments' in completed.stderr,completed.stderr
+    rejected(scripts/'vectorize.py','trace','--work',work/'analysis','--plan',work/'plan.json','--output',work/'old-trace.svg','--line-art',work/'lines.svg')
+    rejected(scripts/'vectorize.py','auto',source,'--output',work/'old-auto','--demo')
+    rejected(scripts/'consolidate_trace.py','--work',work/'analysis','--plan',work/'plan.json','--output',work/'old-consolidated.svg','--line-art',work/'lines.svg')
+    rejected(scripts/'svg_compat.py',result,'--check','--final-demo')
     # Old-style fallback paint and reusable geometry must become visible literal geometry.
     old=work/'legacy.svg';old.write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><defs><g id="mark"><rect width="20" height="20" fill="var(--paint,#38ab73)"/></g></defs><use href="#mark"/></svg>',encoding='utf-8')
     fixed=normalize(load_svg(old));write_svg(fixed,work/'fixed.svg')
@@ -55,5 +62,5 @@ def main():
     try:normalize(unsupported)
     except ValueError:pass
     else:raise AssertionError('Unsupported stylesheet was silently ignored')
-    print(json.dumps({'passed':['dimensions','transparent_background','partial_alpha','hole','literal_color','one_pixel_line','demo_generation','legacy_color_repair','unsupported_css_rejection'],'work':str(work)}))
+    print(json.dumps({'passed':['dimensions','transparent_background','partial_alpha','hole','literal_color','one_pixel_line','render_vs_prepared_rgb_diagnostics','replay_removed_from_cli','legacy_color_repair','unsupported_css_rejection'],'work':str(work)}))
 if __name__=='__main__':main()
