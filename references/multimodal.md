@@ -8,7 +8,7 @@ Without actual visual access, deterministic structural checks may continue, but 
 
 ## Reduce interpretation load
 
-- Review ownership, roles, contour detail and replay separately, with fixed crop coordinates between iterations.
+- Review ownership, roles, contour detail and rendered appearance separately, with fixed crop coordinates between iterations.
 - Use palette IDs from the actual atlas; never transplant example indices.
 - Tools supply exact contours; the model supplies semantic masks and corrections. Broad polygons plus color filters often suffice.
 - Repair uncertain overlaps with late assignments to existing regions, then recheck the crop.

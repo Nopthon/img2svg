@@ -1,34 +1,35 @@
-# Hand-authored geometry and replay metadata
+# Hand-authored native SVG
 
-Use SVG paths/primitives with literal paints and preserve the image's dimensions and ratio. `svg_compat.py --check` applies to manual and traced SVGs alike; no tracing step is required.
+Use standard SVG paths and primitives with literal paints and preserve the image's dimensions and aspect ratio. `svg_compat.py --check` applies to manually authored and traced SVGs alike; no tracing step is required.
 
-For `make_demo.py`, place semantic region groups directly inside `<g id="artwork">`, and all visible geometry inside tone groups:
+Keep semantic regions as optional editable groups. They help identify which colours, details and contours belong to an object, without changing its final paint order.
 
 ```xml
 <svg xmlns="http://www.w3.org/2000/svg" version="1.1"
      width="120" height="80" viewBox="0 0 120 80"
      preserveAspectRatio="xMidYMid meet">
   <g id="artwork">
-    <g id="shape" data-region="shape" data-base="#89b97a" data-order="0">
-      <g id="shape-color" data-tone="color" data-order="0">
-        <path id="shape-body" d="M20 60 Q20 15 100 20 Q90 65 20 60 Z"
-              fill="#89b97a" stroke="none"/>
-      </g>
-      <g id="shape-ink" data-tone="ink" data-order="0">
-        <path id="shape-line" d="M20 60 Q60 40 100 20"
-              fill="none" stroke="#435e42" stroke-width="2"/>
-      </g>
+    <g id="shape" data-region="shape" data-base="#89b97a">
+      <path id="shape-body" d="M20 60 Q20 15 100 20 Q90 65 20 60 Z"
+            fill="#89b97a" stroke="none"/>
+      <path id="shape-line" d="M20 60 Q60 40 100 20"
+            fill="none" stroke="#435e42" stroke-width="2"/>
     </g>
   </g>
 </svg>
 ```
 
-- Every `id` must be unique. `data-region` names the visible object; `data-base` is its literal six-digit base color.
-- `data-tone` is one of `background`, `ink`, `color`, `shadow`, `highlight`, `detail`. `data-order` is 0–1, controlling onset within that stage; it does not change SVG stacking order.
-- SVG document order controls final occlusion; keep geometry in its final stack even though replay reveals it by role.
-- Tone groups are animation wrappers: do not encode intrinsic transparency in their `opacity`. Put intrinsic alpha on shapes or a nested non-tone group.
-- Use only real reference shadows/highlights; empty stages are omitted.
-- Optional `--line-art work/lines.svg` enables stroke-by-stroke replay. It needs the same `viewBox`, literal paints, unique IDs that do not collide with the main artwork, and open centerline paths with `fill="none"`. Final ink shapes stay in the main artwork.
-- Optional `--plan work/plan.json` adds `coordinate_size` and `construction` guides per the painting-plan schema.
+- Every `id` must be unique; `data-region` can identify the associated visual object.
+- Optional `data-tone` values such as `background`, `color`, `ink`, `shadow`, `highlight` and `detail` may help inspect and edit grouped paint.
+- SVG document order determines stacking and occlusion. Preserve the intended visible geometry and colour coverage.
+- Apply opacity to the actual shape or a suitable local group; avoid unexpectedly multiplying overlapping alpha.
+- Use shadows and highlights visible in the source, not imagined extra details.
+- Prefer literal `#RRGGBB` paints and allowed native primitives. See [compatibility](compatibility.md).
 
-Then run `python scripts/make_demo.py outputs/illustration.svg --output outputs/index.html` with the optional line-art and plan arguments.
+Validate any hand-authored output:
+
+```text
+python scripts/svg_compat.py outputs/illustration.svg --check
+```
+
+Use `render_check.py` and `visual_review.py compare` when a raster reference is available. Numerical similarity is not a substitute for checking the original image at 1:1 and on important crops.

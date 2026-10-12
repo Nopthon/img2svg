@@ -1,10 +1,10 @@
 """Single fidelity <-> size control shared by every stage.
 
 0 = smallest file (aggressively merged, coarse contours);
-100 = most faithful (per-contour pixel tracing); default = 55 (balanced).
+100 = highest-detail preset (still quantized and approximated); default = 55 (balanced).
 
 Both the command-line tool (`--fidelity`) and the agent skill use this one axis.
-The skill asks the user where to sit on it. Accepts a number 0..100 or one of
+The agent chooses regional budgets from visual evidence and user constraints. Accepts a number 0..100 or one of
 the named presets `faithful` (100), `balanced` (55), `compact` (0).
 """
 NAMES={'faithful':100,'balanced':55,'compact':0}
@@ -28,9 +28,14 @@ def profile(fidelity):
     t=f/100.0
     return {
         'fidelity':f,
-        'colors':int(round(32+48*t)),
+        # More fidelity increases the actual palette resolution, not just the
+        # number of polygons tracing the same few flat pigments.
+        'colors':int(round(32+80*t)),
         'label_min_area':int(round(16*(1-t))),
         'epsilon':round(1.5-0.95*t,3),
-        'overlap':round(1.4+0.2*(1-t),3),
+        # Half-pixel contour coordinates need only a narrow edge backing.
+        # Wider strokes make darker pigments cover neighbouring shades,
+        # creating a systematic negative RGB bias during SVG rendering.
+        'overlap':round(.8-.1*t,3),
         'merge_distance':int(round(24*(1-t))),
     }

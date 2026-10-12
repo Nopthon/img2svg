@@ -103,7 +103,7 @@ def main():
     p.add_argument('--work',required=True);p.add_argument('--plan',required=True);p.add_argument('--output',required=True)
     p.add_argument('--merge-distance',type=float,default=22);p.add_argument('--min-area',type=int,default=12)
     p.add_argument('--epsilon',type=float,default=.55);p.add_argument('--overlap',type=float,default=.4)
-    p.add_argument('--report');p.add_argument('--line-art');a=p.parse_args()
+    p.add_argument('--report');a=p.parse_args()
     if not 0<=a.merge_distance<=50 or not 1<=a.min_area<=100 or not .05<=a.epsilon<=2 or not 0<=a.overlap<=2:p.error('Consolidation parameters outside supported bounds')
     plan=json.loads(Path(a.plan).read_text(encoding='utf-8-sig'))
     labels,palette,alpha,regions,mapping=load_prepared(a.work,plan);h,w=labels.shape
@@ -115,7 +115,7 @@ def main():
     # This is native geometry, not a raster hidden behind the trace.
     if np.all(alpha==255):
         root.append(node('rect',{'id':'drawing-paper','x':0,'y':0,'width':w,'height':h,'fill':regions[0]['base'],'stroke':'none'}))
-    art=node('g',{'id':'artwork'});root.append(art);report=[];paths=0;vertices=0;contours=0;ink_mask=np.zeros((h,w),bool)
+    art=node('g',{'id':'artwork'});root.append(art);report=[];paths=0;vertices=0;contours=0
     for ri,r in enumerate(regions):
         ys,xs=np.where((mapping==ri)&(alpha>0))
         if not len(xs):continue
@@ -135,15 +135,14 @@ def main():
         if any(not 0<=int(settings.get(key,0))<=100 for key in ('base_hole_area','ink_hole_area')):raise ValueError('Hole repair area must be 0..100')
         if np.any(alpha!=255) and any(settings.get(key,0) for key in ('base_hole_area','ink_hole_area')):raise ValueError('Hole repair needs an opaque source; preserve transparent negative space')
         counts=np.bincount(local[owned],minlength=len(palette));roles=[role_for(r,i,plan.get('roles',{})) for i in range(len(palette))]
-        ink_mask[y:y+bh,x:x+bw]|=owned&np.isin(local,[i for i,role in enumerate(roles) if role=='ink'])
         groups=consolidate(palette,counts,roles,merge,role_distances);lookup=np.zeros(len(palette),np.int16)
         for i,g in enumerate(groups):
             for ci in g['members']:lookup[ci]=i
         codes=lookup[local];codes,removed=merge_fragments(codes,owned,groups,area,protected,long)
-        group=node('g',{'id':r['id'],'data-region':r['id'],'data-base':r['base'],'data-order':ri/max(1,len(regions)-1),'transform':f'translate({x} {y})'});art.append(group)
+        group=node('g',{'id':r['id'],'data-region':r['id'],'data-base':r['base'],'transform':f'translate({x} {y})'});art.append(group)
         layers={}
         def layer(tone):
-            if tone not in layers:layers[tone]=node('g',{'id':r['id']+'-'+tone,'data-tone':tone,'data-order':ri/max(1,len(regions)-1)})
+            if tone not in layers:layers[tone]=node('g',{'id':r['id']+'-'+tone,'data-tone':tone})
             return layers[tone]
         def paint(mask,paint_hex,tone,identity,stroke=overlap):
             nonlocal paths,vertices,contours
@@ -171,11 +170,7 @@ def main():
             if tone in layers:group.append(layers[tone])
         report.append(dict(region=r['id'],pigments_before=int(np.count_nonzero(counts)),pigments_after=len(groups),settings={'merge_distance':merge,'role_merge_distances':role_distances,'min_area':area,'epsilon':epsilon,'overlap':overlap,'protected_area':protected,'keep_long':long,'base_hole_area':int(settings.get('base_hole_area',0)),'ink_hole_area':int(settings.get('ink_hole_area',0))},**removed))
     validate(root);write_svg(root,a.output)
-    strokes=None
-    if a.line_art:
-        from stroke_replay import make_lines
-        strokes=make_lines(ink_mask,mapping,regions,w,h,a.line_art,plan.get('replay',{}))
-    data={'mode':'consolidated','toolkit_version':VERSION,'input_palette':palette_id(palette),'plan_sha256':hashlib.sha256(Path(a.plan).read_bytes()).hexdigest(),'svg_bytes':Path(a.output).stat().st_size,'paths':paths,'closed_contours':contours,'vertices':vertices,'pencil_strokes':strokes,'regions':report,'parameters':{'merge_distance':a.merge_distance,'min_area':a.min_area,'epsilon':a.epsilon,'overlap':a.overlap},'note':'Deliberately consolidates texture for a cleaner enlarged look; compare whole image and zoom crops before accepting.'}
+    data={'mode':'consolidated','toolkit_version':VERSION,'input_palette':palette_id(palette),'plan_sha256':hashlib.sha256(Path(a.plan).read_bytes()).hexdigest(),'svg_bytes':Path(a.output).stat().st_size,'paths':paths,'closed_contours':contours,'vertices':vertices,'regions':report,'parameters':{'merge_distance':a.merge_distance,'min_area':a.min_area,'epsilon':a.epsilon,'overlap':a.overlap},'note':'Deliberately consolidates texture for a cleaner enlarged look; compare whole image and zoom crops before accepting.'}
     target=a.report or str(Path(a.output).with_suffix('.consolidate-report.json'));save_json(target,data)
     print(json.dumps({k:v for k,v in data.items() if k!='regions'}))
 if __name__=='__main__':

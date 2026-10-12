@@ -6,7 +6,6 @@ import numpy as np
 from PIL import Image
 from vectorize import load_prepared,palette_id,plan_regions
 from region_cleanup import clean_regions
-from stroke_replay import chains,make_lines
 from svg_compat import load_svg
 from version import VERSION
 
@@ -45,20 +44,8 @@ def main():
     _,reassigned=plan_regions(revised,labels);changed=mapping!=reassigned
     assert changed[20,20] and int(changed.sum())==121
     passed.append('local_ownership_override')
-    cross=np.zeros((h,w),np.uint8);cross[48,10:118]=1;cross[10:86,64]=1
-    paths,_=chains(cross,np.zeros_like(mapping),4)
-    assert len(paths)==2 and sum(len(s)-1 for s in paths)==int(cross.sum())-1,'Junction did not preserve two continuous branches'
-    split=mapping.copy();paths_split,_=chains(cross,split,4)
-    for seq in paths_split:assert len({int(split[s//w,s%w]) for s in seq})==1,'Replay crossed semantic boundary'
-    passed+=['crossing_stroke_continuity','replay_ownership_boundary']
-    curved=np.zeros((h,w),np.uint8)
-    xy=np.array([[x,round(40+12*np.sin(x/22))] for x in range(10,118)],np.int32)
-    cv2.polylines(curved,[xy],False,1,2)
-    make_lines(curved,np.zeros_like(mapping),[{'id':'curve'}],w,h,work/'curve.svg')
-    assert any('C' in n.get('d','') for n in load_svg(work/'curve.svg')),'No supported Bézier generated'
-    passed.append('supported_smooth_replay')
     (work/'plan.json').write_text(json.dumps(plan),encoding='utf-8')
-    run('vectorize.py','trace','--work',work,'--plan',work/'plan.json','--output',work/'illustration.svg','--line-art',work/'line-art.svg')
+    run('vectorize.py','trace','--work',work,'--plan',work/'plan.json','--output',work/'illustration.svg')
     run('visual_review.py','inspect',work/'reference.png','--output',work/'inspection','--tile-size',128)
     run('visual_review.py','plan',work/'reference.png','--work',work,'--plan',work/'plan.json','--output',work/'plan-review')
     run('visual_review.py','compare',work/'reference.png','--svg',work/'illustration.svg','--plan',work/'plan.json','--output',work/'comparison')
@@ -67,10 +54,6 @@ def main():
     assert Image.open(work/'plan-review/regions-full.png').size==(w,h)
     run('visual_review.py','audit','--review',work/'comparison/review-template.json','--comparison',work/'comparison/comparison.json','--svg',work/'illustration.svg',expected=2)
     passed+=['visual_evidence_generation','critical_crops','no_automatic_visual_pass','pending_review_rejected']
-    # Pencil changes must never change the finished pigment geometry.
-    run('vectorize.py','trace','--work',work,'--plan',work/'plan.json','--output',work/'legacy-final.svg','--line-art',work/'legacy-line.svg','--pencil-mode','legacy')
-    assert (work/'legacy-final.svg').read_bytes()==(work/'illustration.svg').read_bytes()
-    passed.append('replay_mode_preserves_final_art')
     assert result['toolkit_version']==VERSION and json.loads((work/'trace-report.json').read_text(encoding='utf-8'))['toolkit_version']==VERSION
     passed.append('version_in_reports')
     # Palette merge: tombstone slot keeps indices stable; new fingerprint rejects stale plans.
@@ -107,11 +90,11 @@ def main():
     run('vectorize.py','palette-merge',str(mwork),'--from','9','--into','1',expected=1)
     passed+=['palette_merge_tombstone','merge_weighted_mean','merge_index_stability','merge_audit_trail','stale_plan_after_merge_rejected','merge_rejections']
     # Oversize limits warn and record but never alter or fail the geometry.
-    run('vectorize.py','trace','--work',work,'--plan',work/'plan.json','--output',work/'limited.svg','--line-art',work/'limited-lines.svg','--max-paths','1','--max-bytes','10')
+    run('vectorize.py','trace','--work',work,'--plan',work/'plan.json','--output',work/'limited.svg','--max-paths','1','--max-bytes','10')
     trace_report=json.loads((work/'trace-report.json').read_text(encoding='utf-8'))
     assert trace_report['oversize']==[{'kind':'paths','value':trace_report['native_paths'],'limit':1},{'kind':'bytes','value':trace_report['svg_bytes'],'limit':10}] and trace_report['native_paths']>1
     assert (work/'limited.svg').exists() and (work/'limited.svg').stat().st_size>10
-    run('vectorize.py','trace','--work',work,'--plan',work/'plan.json','--output',work/'limited2.svg','--line-art',work/'limited2-lines.svg')
+    run('vectorize.py','trace','--work',work,'--plan',work/'plan.json','--output',work/'limited2.svg')
     assert (work/'limited2.svg').read_bytes()==(work/'illustration.svg').read_bytes(),'Limits or report changes altered final geometry'
     passed+=['oversize_reported','limits_preserve_geometry']
     # Fidelity axis trades detail for size across stages.

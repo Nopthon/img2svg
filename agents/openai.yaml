@@ -1,4 +1,4 @@
 interface:
   display_name: "Image to SVG"
-  short_description: "Reconstruct a reference image as an SVG and build an offline drawing-replay demo"
-  default_prompt: "Use $img2svg to reconstruct the reference image as an SVG and generate a single-file drawing replay demo."
+  short_description: "Visually plan and compare compact, faithful SVG reconstructions"
+  default_prompt: "Use $img2svg to inspect the reference image, author semantic regions with local detail budgets, compare SVG candidates visually, and deliver the selected native SVG reconstruction."

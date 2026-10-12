@@ -1,5 +1,5 @@
 """Generate inspectable evidence, not an automatic certificate of visual fidelity.
-All PNGs are scratch analysis artifacts; never embed them in delivered SVG/HTML.
+All PNGs are scratch analysis artifacts; never embed them in delivered SVG.
 """
 import argparse,hashlib,io,json,math,re,sys
 from pathlib import Path
@@ -133,20 +133,33 @@ def metrics(ref,out):
     precision=float((e2&(cv2.dilate(e1.astype('uint8'),k)>0)).sum()/e2.sum()) if e2.any() else 1.
     lab1=_srgb_to_lab(rgb1);lab2=_srgb_to_lab(rgb2);de=_ciede2000(lab1,lab2)
     cast=(lab2-lab1).reshape(-1,3).mean(axis=0)
-    return {'rgb_mae_white':float(delta.mean()),'rgb_p95_white':float(np.percentile(delta,95)),'alpha_mae':float(np.abs(ref[:,:,3].astype(float)-out[:,:,3].astype(float)).mean()),'edge_recall_2px':recall,'edge_precision_2px':precision,'lab_delta_e00_mean':float(de.mean()),'lab_delta_e00_p95':float(np.percentile(de,95)),'lab_cast':{'dL':float(cast[0]),'da':float(cast[1]),'db':float(cast[2])}}
+    black1=ref[:,:,:3].astype(float)*(ref[:,:,3:4]/255.)
+    black2=out[:,:,:3].astype(float)*(out[:,:,3:4]/255.)
+    return {'rgb_mae_white':float(delta.mean()),'rgb_mae_black':float(np.abs(black1-black2).mean()),'rgb_p95_white':float(np.percentile(delta,95)),'alpha_mae':float(np.abs(ref[:,:,3].astype(float)-out[:,:,3].astype(float)).mean()),'edge_recall_2px':recall,'edge_precision_2px':precision,'lab_delta_e00_mean':float(de.mean()),'lab_delta_e00_p95':float(np.percentile(de,95)),'lab_cast':{'dL':float(cast[0]),'da':float(cast[1]),'db':float(cast[2])}}
 
-def compare(a):
+def render_svg(svg,width=None,height=None):
+    """Shared independent renderer; never stretch away a geometry defect."""
     try:
         import pymupdf
     except ImportError:
         raise SystemExit('pymupdf is not installed; run pip install -r requirements-render.txt before visual comparison')
+    from svg_compat import load_svg,validate
+    info=validate(load_svg(svg));vw,vh=info['viewBox'][2:]
+    if width is not None and width<=0:raise ValueError('Render width must be positive')
+    if height is not None and (width is None or height<=0 or abs(vw/vh-width/height)>1e-5):
+        raise ValueError('SVG aspect ratio differs; do not resize away a geometry defect')
+    with pymupdf.open(svg) as doc:
+        page=doc[0]
+        scale=width/page.rect.width if width is not None else 1
+        scale_y=height/page.rect.height if height is not None else scale
+        pix=page.get_pixmap(matrix=pymupdf.Matrix(scale,scale_y),alpha=True)
+        actual=np.array(Image.open(io.BytesIO(pix.tobytes('png'))).convert('RGBA'))
+    return actual,info,'MuPDF '+pymupdf.VersionBind
+
+def compare(a):
     out=Path(a.output);out.mkdir(parents=True,exist_ok=True)
     ref=image_rgba(a.reference);h,w=ref.shape[:2]
-    from svg_compat import load_svg,validate
-    info=validate(load_svg(a.svg));vw,vh=info['viewBox'][2:]
-    if abs(vw/vh-w/h)>1e-5:raise ValueError('SVG aspect ratio differs; do not resize away a geometry defect')
-    doc=pymupdf.open(a.svg);page=doc[0];pix=page.get_pixmap(matrix=pymupdf.Matrix(w/page.rect.width,h/page.rect.height),alpha=True)
-    actual=np.array(Image.open(io.BytesIO(pix.tobytes('png'))).convert('RGBA'))
+    actual,info,renderer=render_svg(a.svg,w,h)
     if actual.shape!=ref.shape:raise ValueError('Renderer dimensions differ from reference')
     Image.fromarray(actual).save(out/'render.png');rgb1,rgb2=white(ref),white(actual)
     error=np.abs(rgb1.astype(float)-rgb2.astype(float)).mean(axis=2)
@@ -164,11 +177,77 @@ def compare(a):
         x,y,bw,bh=r['box'];file=out/(r['id']+'-comparison.png')
         panel([rgb1[y:y+bh,x:x+bw],rgb2[y:y+bh,x:x+bw],heat[y:y+bh,x:x+bw]],['Reference','SVG','Difference x6'],640,True).save(file)
         crops.append(dict(r,file=str(file.resolve()),metrics=metrics(ref[y:y+bh,x:x+bw],actual[y:y+bh,x:x+bw])))
-    report={'source_sha256':sha(a.reference),'svg_sha256':sha(a.svg),'renderer':'MuPDF '+pymupdf.VersionBind,'toolkit_version':VERSION,'size':[w,h],'global':metrics(ref,actual),'crops':crops,'structural':info,'quality_pass':None,'note':'Metrics locate differences; a blurred or fragmented image can still score well. Inspect crops before claiming fidelity.'}
+    report={'source_sha256':sha(a.reference),'svg_sha256':sha(a.svg),'plan_sha256':sha(a.plan) if a.plan else None,'renderer':renderer,'toolkit_version':VERSION,'size':[w,h],'global':metrics(ref,actual),'crops':crops,'structural':info,'quality_pass':None,'note':'Metrics locate differences; a blurred or fragmented image can still score well. Inspect crops before claiming fidelity.'}
     save_json(out/'comparison.json',report)
     draft={'image_access':'unconfirmed','svg_sha256':sha(a.svg),'inspected_images':[],'checks':[{'id':'whole-composition','critical':True,'status':'pending','observation':''}]+[{'id':r['id'],'critical':r['critical'],'status':'pending','observation':''} for r in rois],'repairs':[],'limitations':[]}
     save_json(out/'review-template.json',draft)
     print(json.dumps({'comparison':str(out/'comparison.json'),'global':report['global'],'crops':len(crops)}))
+
+def candidate_failures(report,max_mae,max_alpha_mae,min_edge_recall):
+    """Numerical screening applies independently to every critical crop."""
+    failures=[]
+    checks=[('whole-composition',report['global'])]
+    checks += [(crop['id'],crop['metrics']) for crop in report['crops'] if crop['critical']]
+    for name,m in checks:
+        if max(m['rgb_mae_white'],m['rgb_mae_black'])>max_mae:failures.append(name+': colour error')
+        if m['alpha_mae']>max_alpha_mae:failures.append(name+': alpha error')
+        if m['edge_recall_2px']<min_edge_recall:failures.append(name+': lost edges')
+    return failures
+
+def candidates(a):
+    """Build a bounded comparison set for an image-capable agent to choose from."""
+    import argparse
+    import contextlib
+    from vectorize import trace
+    from quality import profile
+    # Fail before touching the output if rendering, inputs or parameters are invalid.
+    import pymupdf
+    profiles=[profile(value.strip()) for value in a.fidelities.split(',')]
+    if not 1<=len(profiles)<=5:raise ValueError('Choose 1..5 fidelity candidates')
+    if len({p['fidelity'] for p in profiles})!=len(profiles):raise ValueError('Duplicate fidelity candidates')
+    if not (math.isfinite(a.max_mae) and a.max_mae>=0 and math.isfinite(a.max_alpha_mae) and a.max_alpha_mae>=0 and 0<=a.min_edge_recall<=1 and a.max_bytes>=0):
+        raise ValueError('Invalid candidate limits')
+    plan=json.loads(Path(a.plan).read_text(encoding='utf-8-sig'))
+    labels,_,_,_,_=load_prepared(a.work,plan)
+    ref=image_rgba(a.reference)
+    if ref.shape[:2]!=labels.shape:raise ValueError('Reference dimensions differ from prepared data')
+    prep=Path(a.work)/'prepare-report.json'
+    if prep.exists() and json.loads(prep.read_text(encoding='utf-8')).get('source_sha256') not in (None,sha(a.reference)):
+        raise ValueError('Prepared data belongs to another reference')
+    rois=roi_list(plan,ref.shape[1],ref.shape[0],[])
+    out=Path(a.output)
+    if out.exists() and any(out.iterdir()):raise ValueError('Use a fresh candidate output directory to preserve previous evidence')
+    out.mkdir(parents=True,exist_ok=True)
+    items=[];views=[white(ref)];titles=['Reference']
+    for prof in profiles:
+        identity='f'+format(prof['fidelity'],'g')
+        folder=out/identity;folder.mkdir()
+        svg=folder/'illustration.svg'
+        args=argparse.Namespace(work=a.work,plan=a.plan,output=svg,max_bytes=a.max_bytes,max_paths=0,report=folder/'trace-report.json',fidelity=prof['fidelity'],epsilon=prof['epsilon'],overlap=prof['overlap'],merge_colors=prof['merge_distance'])
+        with contextlib.redirect_stdout(io.StringIO()):
+            trace(args)
+            compare(argparse.Namespace(reference=a.reference,svg=svg,plan=a.plan,output=folder,roi=[]))
+        report=json.loads((folder/'comparison.json').read_text(encoding='utf-8'))
+        failures=candidate_failures(report,a.max_mae,a.max_alpha_mae,a.min_edge_recall)
+        size=svg.stat().st_size
+        if a.max_bytes and size>a.max_bytes:failures.append('file size exceeds budget')
+        report['candidate_id']=identity
+        save_json(folder/'comparison.json',report)
+        review_path=folder/'review-template.json'
+        review=json.loads(review_path.read_text(encoding='utf-8'))
+        review.update(candidate_id=identity,selection_reason='')
+        save_json(review_path,review)
+        items.append({'id':identity,'svg':str(svg.resolve()),'svg_sha256':report['svg_sha256'],'svg_bytes':size,'parameters':prof,'global':report['global'],'screen_pass':not failures,'screen_failures':failures,'comparison':str((folder/'comparison.json').resolve()),'review_template':str(review_path.resolve())})
+        views.append(white(np.array(Image.open(folder/'render.png').convert('RGBA'))))
+        titles.append(f'{identity}: {size:,} bytes')
+    panel(views,titles,400).save(out/'candidates.png')
+    for roi in rois:
+        x,y,w,h=roi['box']
+        panel([v[y:y+h,x:x+w] for v in views],titles,320,True).save(out/(roi['id']+'-candidates.png'))
+    eligible=[item for item in items if item['screen_pass']]
+    proposal=min(eligible,key=lambda item:item['svg_bytes'])['id'] if eligible else None
+    save_json(out/'candidate-report.json',{'source_sha256':sha(a.reference),'plan_sha256':sha(a.plan),'toolkit_version':VERSION,'thresholds':{'max_mae':a.max_mae,'max_alpha_mae':a.max_alpha_mae,'min_edge_recall':a.min_edge_recall,'max_bytes':a.max_bytes},'candidates':items,'proposed_candidate':proposal,'quality_pass':None,'note':'A numerical proposal is not visual acceptance. Inspect full panels and critical crops, record candidate-specific observations and selection_reason, then audit the chosen review. If none passes, repair the plan or report the unmet budget.'})
+    print(json.dumps({'candidate_report':str((out/'candidate-report.json').resolve()),'proposed_candidate':proposal,'visual_review':'pending'}))
 
 def audit(a):
     review=json.loads(Path(a.review).read_text(encoding='utf-8-sig'));report=json.loads(Path(a.comparison).read_text(encoding='utf-8-sig'))
@@ -177,6 +256,9 @@ def audit(a):
     if a.svg and sha(a.svg)!=report['svg_sha256']:errors.append('SVG changed since comparison')
     if review.get('image_access')!='confirmed':errors.append('Actual image access unconfirmed')
     if not review.get('inspected_images'):errors.append('No inspected image paths recorded')
+    if report.get('candidate_id'):
+        if review.get('candidate_id')!=report['candidate_id']:errors.append('Review refers to a different candidate')
+        if not review.get('selection_reason','').strip():errors.append('Candidate selection reason is missing')
     checks={c['id']:c for c in review.get('checks',[])}
     required=['whole-composition']+[r['id'] for r in report['crops'] if r['critical']]
     for rid in required:
@@ -193,7 +275,9 @@ def main():
     s=sub.add_parser('plan');s.add_argument('reference');s.add_argument('--work',required=True);s.add_argument('--plan',required=True);s.add_argument('--output',required=True);s.add_argument('--roi',action='append',default=[])
     s=sub.add_parser('compare');s.add_argument('reference');s.add_argument('--svg',required=True);s.add_argument('--plan');s.add_argument('--output',required=True);s.add_argument('--roi',action='append',default=[])
     s=sub.add_parser('audit');s.add_argument('--review',required=True);s.add_argument('--comparison',required=True);s.add_argument('--svg')
-    a=p.parse_args();{'inspect':inspect,'plan':plan_review,'compare':compare,'audit':audit}[a.command](a)
+    s=sub.add_parser('candidates');s.add_argument('reference');s.add_argument('--work',required=True);s.add_argument('--plan',required=True);s.add_argument('--output',required=True)
+    s.add_argument('--fidelities',default='faithful,balanced,compact');s.add_argument('--max-bytes',type=int,default=0);s.add_argument('--max-mae',type=float,default=4);s.add_argument('--max-alpha-mae',type=float,default=1);s.add_argument('--min-edge-recall',type=float,default=.97)
+    a=p.parse_args();{'inspect':inspect,'plan':plan_review,'compare':compare,'audit':audit,'candidates':candidates}[a.command](a)
 if __name__=='__main__':
     if hasattr(sys.stdout,'reconfigure'):sys.stdout.reconfigure(encoding='utf-8')
     main()
